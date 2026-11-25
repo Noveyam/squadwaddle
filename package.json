@@ -1,0 +1,14 @@
+{
+  "name": "squadwaddle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local-first development starter for a Discord session coordinator for Marathon.",
+  "engines": { "node": ">=24.12.0 <25" },
+  "scripts": {
+    "demo": "node src/demo.ts",
+    "test": "node --test test/*.test.ts",
+    "start": "node --env-file-if-exists=.env src/server.ts",
+    "register": "node --env-file-if-exists=.env scripts/register-commands.ts"
+  }
+}
