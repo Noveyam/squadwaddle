@@ -1,0 +1,16 @@
+**
+!.dockerignore
+!Dockerfile
+!package.json
+!src/
+src/**
+!src/capacity.ts
+!src/discord-voice-gateway.ts
+!src/discord.ts
+!src/schedule-text.ts
+!src/server.ts
+!src/store.ts
+!src/types.ts
+!src/voice-pilot.ts
+!src/voice-room-registry.ts
+!src/voice-rooms.ts
