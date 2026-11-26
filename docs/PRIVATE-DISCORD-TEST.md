@@ -13,7 +13,7 @@ node --version
 npm test
 ```
 
-Look for **54 passed**. The two HTTP tests start a temporary server on your Mac and send it signed test requests. They need permission to open a local port. They use generated keys and run before any Discord setup. You can repeat the fictional walkthrough with `npm run demo`.
+Look for **0 failed**. Two HTTP tests start a temporary server on your Mac and send it signed test requests. They need permission to open a local port. They use generated keys and run before any Discord setup. You can repeat the fictional walkthrough with `npm run demo`.
 
 ## 2. Set up the private server and local settings
 

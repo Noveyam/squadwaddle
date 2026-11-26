@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { handleInteraction, EPHEMERAL, type PilotConfig } from './discord.ts';
+import { handleInteraction, EPHEMERAL, REPLAY_NOTICE, type PilotConfig } from './discord.ts';
 import type { SessionStoreContract } from './types.ts';
 
 /** Signature protocol: https://docs.discord.com/developers/interactions/overview
@@ -75,8 +75,8 @@ function json(res: ServerResponse, status: number, value: unknown): void {
 }
 
 /** No outbound calls. Responses are inline Discord callbacks and must complete within 3 seconds.
- * A process-local replay set prevents duplicate mutations while running. This is NOT a durable
- * inbox/outbox: a crash between a store commit and Discord receiving the response is unreconciled.
+ * The local replay set covers all interactions while running. Successful Publish IDs also survive
+ * a restart with file-backed SQLite. Delivery after the database commit remains unreconciled.
  * No interaction tokens, raw bodies, names, or request headers are logged or retained here.
  */
 export function createInteractionServer(config: ServerConfig, store: SessionStoreContract,
@@ -105,20 +105,24 @@ export function createInteractionServer(config: ServerConfig, store: SessionStor
       if (!input || typeof input !== 'object' || Array.isArray(input)) throw new HttpError(400);
       const payload = input as Record<string, unknown>;
       if (payload.application_id !== config.applicationId) throw new HttpError(401);
-      if (payload.type !== 1) {
-        if (typeof payload.id !== 'string' || !SNOWFLAKE.test(payload.id)) throw new HttpError(400);
-        const time = now();
-        for (const [id, expiresAt] of completed) if (time > expiresAt) completed.delete(id);
-        if (completed.has(payload.id)) {
-          json(res, 200, { type: 4, data: { flags: EPHEMERAL, allowed_mentions: { parse: [] },
-            content: 'This request was already handled. Use /session find to check the current session.' } }); return;
-        }
-        if (completed.size >= 10_000) throw new HttpError(503);
-        // A signed timestamp slightly in the future can remain valid longer than five
-        // minutes after receipt. Retain its interaction ID for that entire interval.
+      if (payload.type === 1) { json(res, 200, handleInteraction(payload, store, config)); return; }
+      if (typeof payload.id !== 'string' || !SNOWFLAKE.test(payload.id)) throw new HttpError(400);
+      const time = now();
+      for (const [id, expiresAt] of completed) if (time > expiresAt) completed.delete(id);
+      if (completed.has(payload.id)) {
+        json(res, 200, { type: 4, data: { flags: EPHEMERAL, allowed_mentions: { parse: [] },
+          content: REPLAY_NOTICE } }); return;
+      }
+      if (completed.size >= 10_000) throw new HttpError(503);
+      const reply = handleInteraction(payload, store, config);
+      const data = payload.data as Record<string, unknown> | undefined;
+      const isPublish = payload.type === 3 && data?.component_type === 2 &&
+        typeof data.custom_id === 'string' && data.custom_id.startsWith('ns:publish:');
+      // Only a fresh, committed Publish returns a public card. Let a rolled-back write retry.
+      if (!isPublish || (reply.type === 4 && ((reply.data.flags ?? 0) & EPHEMERAL) === 0)) {
         completed.set(payload.id, Math.max(time, Number(req.headers['x-signature-timestamp']) * 1000) + FRESHNESS_SECONDS * 1000);
       }
-      json(res, 200, handleInteraction(input, store, config));
+      json(res, 200, reply);
     } catch (error) {
       // Never echo exception details; signed content can still contain private user data.
       if (!res.headersSent) {

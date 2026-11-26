@@ -6,6 +6,7 @@ import type { Actor, PublicSession, SessionInput, SessionStoreContract } from '.
  * Legacy content + action-row buttons remain supported; no privileged message intent is used.
  */
 export const EPHEMERAL = 64;
+export const REPLAY_NOTICE = 'This request was already handled. Check the channel or use /session find to see the current session.';
 const SUPPRESS_EMBEDS = 4;
 const SNOWFLAKE = /^\d{17,20}$/;
 const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -140,6 +141,7 @@ function errorMessage(error: unknown): string {
     SESSION_NOT_OPEN: 'That session is no longer open.',
     SESSION_ENDED: 'That session has ended. Use /session find for another group.',
     ALREADY_PUBLISHED: 'This session was already published. Use /session find.',
+    PUBLISH_REPLAY: REPLAY_NOTICE,
     INVALID_INPUT: 'Check your inputs. Use full ISO dates with a UTC offset and an IANA time zone.',
     VALIDATION_ERROR: 'Check your details. Bungie Names need # and four digits; session times need future ISO dates with offsets and an IANA time zone.',
   };
@@ -214,8 +216,8 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
     if (!match) throw new InputError('Invalid session button.');
     const [, action, id] = match;
     if (action === 'publish') {
-      if (store.getSession(actor, id).status !== 'draft') throw new InputError('This draft was already published or discarded. Use /session find.');
-      return { type: 4, data: publicCard(store.publish(actor, id)) };
+      if (typeof payload.id !== 'string' || !SNOWFLAKE.test(payload.id)) throw new InputError('Invalid Publish interaction.');
+      return { type: 4, data: publicCard(store.publish(actor, id, payload.id)) };
     }
     if (action === 'discard') {
       const draft = store.getSession(actor, id);

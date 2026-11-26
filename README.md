@@ -2,7 +2,7 @@
 
 A first code starter for Novey's Discord app: arrange a relaxed **Marathon** session with a clear start and finish, three seats including the host, and optional Bungie Name sharing.
 
-**Status: runnable local prototype.** The demo and automated tests run without Discord, Bungie, OpenAI credentials or an npm install. A Discord HTTP interaction adapter and registration script are included, but no app has been created, installed, registered, deployed or tested against a live Discord server.
+**Private prototype.** The demo and automated tests use fictional data and run without credentials or an npm install. In the private test server, the registered `/session profile` command returned a private reply. Multi-player testing is pending.
 
 ## Start on your MacBook
 
@@ -44,7 +44,7 @@ Public cards contain no Bungie Names. The host uses the same sharing rules as ev
 
 ## Included Discord commands
 
-These become available only after a future authorized app setup and registration:
+The private test server has the guild-scoped `/session` command. It needs a running interaction endpoint to respond.
 
 | Command | Purpose |
 | --- | --- |
@@ -83,7 +83,9 @@ Until that environment setting is deliberately enabled and credentials are confi
 
 This increment does **not** contain AI interpretation, voice, notifications, a waitlist, recurring sessions, external account linking, automatic in-game invitations, payments or personal ratings. It does not verify activity unlocks, game ownership, cross-play settings or anyone's account ownership.
 
-Cards can become stale: joining through a private search result does not automatically update the original public card, and cancellation requires a card refresh for its display to change. The database still enforces current capacity and access. Process-local duplicate-request protection is included; durable retry and reconciliation with Discord message delivery are not. Those gaps must be addressed before treating this as a dependable public service.
+When the host presses **Publish**, SQLite opens the draft and saves the Discord interaction ID and session ID in one transaction. If the app restarts using the same database file, a retry of that interaction gets a private acknowledgement. A second click on an already-open session also gets a private reply. An in-memory database lasts only until shutdown.
+
+If the app stops after committing but before Discord receives the public card, the session can appear in `/session find` even when the card is missing from the channel. Checking delivery and recovering that missing card remain future work. Other interaction types have process-local duplicate protection. Joining through a private search result or cancelling a session can leave the original card stale until someone presses **Refresh**.
 
 The database is ordinary local SQLite, readable by the app operator. Clearing a name removes it from active records and sharing snapshots; this does not recall messages, screenshots or copies already made. Automatic data expiry, full account deletion and production backup/deletion behavior remain to be designed. No real participant dataset is bundled.
 

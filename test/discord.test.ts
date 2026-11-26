@@ -1,11 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { request } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { duplexPair } from 'node:stream';
+import { text } from 'node:stream/consumers';
 import type { AddressInfo } from 'node:net';
 import type { Actor, GroupMember, PublicSession, SessionInput, SessionStoreContract } from '../src/types.ts';
 import { handleInteraction, publicCard, safeText, EPHEMERAL, SESSION_COMMAND } from '../src/discord.ts';
 import { createInteractionServer, loadServerConfig } from '../src/server.ts';
 import { registerCommands } from '../scripts/register-commands.ts';
+import { SessionStore } from '../src/store.ts';
 
 const APP = '100000000000000001';
 const GUILD = '100000000000000002';
@@ -33,7 +42,12 @@ class FakeStore implements SessionStoreContract {
   createDraft(actor: Actor, input: SessionInput, shareName = false) {
     this.note('createDraft', actor, input, shareName); this.session = { ...sample(), ...input, status: 'draft' }; return this.session;
   }
-  publish(actor: Actor, id: string) { this.note('publish', actor, id); this.session.status = 'open'; return this.session; }
+  publish(actor: Actor, id: string, interactionId?: string) {
+    if (this.session.status === 'open') throw Object.assign(new Error(), { code: 'ALREADY_PUBLISHED' });
+    this.note('publish', actor, id, interactionId);
+    this.session.status = 'open';
+    return this.session;
+  }
   join(actor: Actor, id: string, shareName = false) { this.note('join', actor, id, shareName); return this.session; }
   leave(actor: Actor, id: string) { this.note('leave', actor, id); return this.session; }
   setSharing(actor: Actor, id: string, shareName: boolean) { this.note('setSharing', actor, id, shareName); return this.session; }
@@ -71,14 +85,92 @@ test('creation is private, preserves explicit time input, and publishes only aft
   assert.deepEqual(store.calls[0].args, [INPUT, true]);
   assert.match(data.content, /Private draft/);
   assert.deepEqual(data.components![0].components.map(c => c.label), ['Publish', 'Discard']);
-  const published = handleInteraction(component('publish', HOST, EPHEMERAL), store, PILOT);
+  const click = { ...component('publish', HOST, EPHEMERAL), id: '100000000000000080' };
+  const published = handleInteraction(click, store, PILOT);
   assert.equal(published.type, 4);
   assert.equal(messageData(published).flags! & EPHEMERAL, 0);
   assert.equal(store.calls.at(-1)!.method, 'publish');
-  const repeat = handleInteraction(component('publish', HOST, EPHEMERAL), store, PILOT);
+  const repeat = handleInteraction({ ...click, id: '100000000000000081' }, store, PILOT);
   assert.equal(messageData(repeat).flags! & EPHEMERAL, EPHEMERAL);
   assert.match(messageData(repeat).content, /already published/);
   assert.equal(store.calls.filter(c => c.method === 'publish').length, 1);
+});
+
+test('after reopening SQLite a committed Publish interaction gets only a private acknowledgement', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'squadwaddle-publish-'));
+  const path = join(dir, 'sessions.sqlite');
+  const now = () => new Date('2026-11-25T12:00:00Z');
+  const actor = { guildId: GUILD, channelId: CHANNEL, userId: HOST };
+  const interactionId = '100000000000000110';
+  let store = new SessionStore(path, now);
+  t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+  const publish = (session: string, id = interactionId) => ({
+    ...component('publish', HOST, EPHEMERAL), id,
+    data: { component_type: 2, custom_id: `ns:publish:${session}` },
+  });
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const config = { ...PILOT, publicKey: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex'),
+    host: '127.0.0.1', port: 3000, dbPath: path };
+  const openServer = () => createInteractionServer(config, store, () => now().getTime());
+  let server = openServer();
+  async function deliver(click: ReturnType<typeof publish>) {
+    const body = JSON.stringify(click);
+    const timestamp = String(now().getTime() / 1000);
+    const signature = sign(null, Buffer.from(timestamp + body), privateKey).toString('hex');
+    // Run Node's HTTP client and the production HTTP parser over a stream pair, without binding a port.
+    const [client, peer] = duplexPair();
+    try {
+      server.emit('connection', peer);
+      const req = request({ method: 'POST', path: '/interactions', createConnection: () => client, headers: {
+        'Content-Type': 'application/json', 'X-Signature-Timestamp': timestamp, 'X-Signature-Ed25519': signature,
+      } });
+      const response = once(req, 'response');
+      req.end(body);
+      const [res] = await response;
+      assert.equal(res.statusCode, 200);
+      return messageData(JSON.parse(await text(res)));
+    } finally {
+      client.destroy();
+      peer.destroy();
+    }
+  }
+  store.saveProfile(actor, 'Fictional#4321');
+  const first = store.createDraft(actor, INPUT, true);
+  const second = store.createDraft(actor, INPUT);
+  const click = publish(first.id);
+  // Force a failure after the status update but before its receipt can be committed.
+  const fault = new DatabaseSync(path);
+  try {
+    fault.exec("CREATE TRIGGER fail_receipt BEFORE INSERT ON publish_receipts BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    const failed = await deliver(click);
+    assert.equal(failed.flags! & EPHEMERAL, EPHEMERAL);
+    assert.equal(store.getSession(actor, first.id).status, 'draft');
+    fault.exec('DROP TRIGGER fail_receipt');
+  } finally {
+    fault.close();
+  }
+  const card = await deliver(click);
+  assert.equal(card.flags! & EPHEMERAL, 0);
+  assert.ok(card.components?.length);
+
+  // Drop the response after the commit. A new handler has no memory of the first click.
+  store.close();
+  store = new SessionStore(path, now);
+  server = openServer();
+  const retry = await deliver(click);
+  assert.equal(retry.flags! & EPHEMERAL, EPHEMERAL);
+  assert.match(retry.content, /already handled/);
+  assert.ok(!retry.components?.length);
+  assert.doesNotMatch(JSON.stringify(retry), /Fictional|Expedition/);
+  assert.deepEqual(store.listSessions(actor).map(s => s.id), [first.id]);
+
+  store.cancel(actor, first.id);
+  assert.deepEqual(await deliver(click), retry);
+  assert.equal(store.getSession(actor, first.id).status, 'cancelled');
+  assert.deepEqual(await deliver(publish(second.id)), retry);
+  assert.equal(store.getSession(actor, second.id).status, 'draft');
+  const fresh = await deliver(publish(second.id, '100000000000000111'));
+  assert.equal(fresh.flags! & EPHEMERAL, 0);
 });
 
 test('actor uses signed member fields only; outside scope and DM invocations never access the store', () => {
@@ -242,7 +334,6 @@ test('registration has an explicit guard and upserts only the pilot guild comman
 });
 
 test('real SQLite store through signed HTTP enforces preview, consent, membership and revocation end to end', async t => {
-  const { SessionStore } = await import('../src/store.ts');
   const now = Date.parse('2026-11-25T12:00:00Z');
   const store = new SessionStore(':memory:', () => new Date(now));
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');

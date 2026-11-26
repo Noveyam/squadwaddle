@@ -1,5 +1,13 @@
 # Verification record
 
+## Publish retry after restart · November 25, 2026
+
+The new regression sends signed Publish requests through the production `POST /interactions` handler and Node's HTTP parser using local streams. A forced receipt-write failure leaves the session in draft, and a retry then succeeds. Reopening the same SQLite file with a fresh server and repeating the original request returns a private acknowledgement. Cancellation survives replay, and reusing the interaction ID cannot publish a different draft.
+
+A separate check used a database created by the previous revision and repeated the identical signed request in two independent Node processes. Only the first returned a public card. An already-open session from the previous revision continued to reject publication.
+
+With Node 24.22.3, `npm run demo` completed. Of 55 tests, 53 passed in the managed workspace. The two existing TCP tests stopped at `listen EPERM` on `127.0.0.1`. The new stream-based HTTP regression passed. Actual Discord delivery and recovery of a missing public card remain unverified.
+
 ## MacBook check · November 25, 2026
 
 Novey ran `npm test` in macOS Terminal with the bundled Node.js 24.22.3 runtime selected. **All 54 tests passed, with 0 failures and 0 skipped.** This run included the signed HTTP request checks and the full session flow through the local HTTP server and SQLite.

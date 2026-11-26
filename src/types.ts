@@ -41,7 +41,8 @@ export type SessionStoreContract = {
   getProfile(actor: Actor): { bungieName: string | null };
   clearProfile(actor: Actor): void;
   createDraft(actor: Actor, input: SessionInput, shareName?: boolean): PublicSession;
-  publish(actor: Actor, id: string): PublicSession;
+  /** Discord supplies the verified interaction ID. Only a new publication returns a card. */
+  publish(actor: Actor, id: string, interactionId?: string): PublicSession;
   join(actor: Actor, id: string, shareName?: boolean): PublicSession;
   leave(actor: Actor, id: string): PublicSession;
   setSharing(actor: Actor, id: string, shareName: boolean): PublicSession;

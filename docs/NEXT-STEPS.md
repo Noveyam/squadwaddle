@@ -20,7 +20,7 @@ Work required:
 2. Use a reachable HTTPS test endpoint. Decide deliberately whether it runs from the MacBook during testing or from a chosen host. Do not buy hosting as a prerequisite for the local demo.
 3. Register `/session` only in that test guild. Verify the endpoint, command availability and supported message/button payloads in live Discord.
 4. Test a host and two consenting testers: private draft, explicit publish, both joining choices, fourth-seat rejection, participant-only names, leave, revoke and cancel. Confirm nobody sees a game ID in a public message.
-5. Resolve message-delivery consistency: store public message IDs, refresh canonical cards when membership changes, and handle duplicate requests or a crash between a database commit and the response reaching Discord. Do not retry publication by blindly posting a second card.
+5. Publish retries now receive a private acknowledgement across restarts when using the same SQLite file. Next, record the public message ID when delivery can be confirmed, refresh the original card after membership changes, and reconcile sessions whose public card may be missing after a crash. A retry alone cannot establish whether Discord received the original card.
 6. Establish minimal participant-data retention, full deletion and moderation/reporting behavior before inviting an external community. Delete test data deliberately after the integration test.
 
 Success is a usable, correctly scoped Discord interaction. Automated local tests alone do not establish this milestone.

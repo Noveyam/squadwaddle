@@ -154,6 +154,10 @@ export class SessionStore implements SessionStoreContract {
         status TEXT NOT NULL CHECK (status IN ('draft', 'open', 'cancelled'))
       );
       CREATE INDEX IF NOT EXISTS sessions_scope_time ON sessions (guild_id, channel_id, status, end_ms);
+      CREATE TABLE IF NOT EXISTS publish_receipts (
+        interaction_id TEXT PRIMARY KEY NOT NULL,
+        session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE
+      );
       CREATE TABLE IF NOT EXISTS members (
         join_order INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -299,14 +303,26 @@ export class SessionStore implements SessionStoreContract {
     });
   }
 
-  publish(actor: Actor, id: string): PublicSession {
+  publish(actor: Actor, id: string, interactionId?: string): PublicSession {
     return this.transaction(() => {
-      const row = this.session(actor, id, false);
+      // Preserve private draft visibility on the Discord button path.
+      const row = this.session(actor, id, interactionId !== undefined);
       if (row.host_user_id !== actor.userId) fail("FORBIDDEN", "Only the host can publish this draft.");
+      if (interactionId !== undefined) {
+        if (typeof interactionId !== "string" || !/^\d{17,20}$/.test(interactionId)) {
+          fail("VALIDATION_ERROR", "A valid Discord interaction ID is required.");
+        }
+        if (this.db.prepare("SELECT 1 FROM publish_receipts WHERE interaction_id = ?").get(interactionId)) {
+          fail("PUBLISH_REPLAY", "This Publish request was already handled.");
+        }
+      }
       if (row.status === "open") fail("ALREADY_PUBLISHED", "This session is already published; do not post it again.");
       if (row.status !== "draft") fail("SESSION_NOT_OPEN", "A cancelled session cannot be published.");
       if (row.start_ms <= this.clock()) fail("VALIDATION_ERROR", "The planned start has passed. Create a draft with a future start time.");
       this.db.prepare("UPDATE sessions SET status = 'open' WHERE id = ?").run(id);
+      if (interactionId !== undefined) {
+        this.db.prepare("INSERT INTO publish_receipts (interaction_id, session_id) VALUES (?, ?)").run(interactionId, id);
+      }
       return this.publicSession({ ...row, status: "open" });
     });
   }
