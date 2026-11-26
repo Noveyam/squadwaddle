@@ -143,7 +143,7 @@ function privateCard(session: PublicSession, prefix = ''): InteractionResponse {
   return { type: 4, data: { ...data, content: prefix + data.content, flags: SUPPRESS_EMBEDS | EPHEMERAL } };
 }
 
-function draftMessage(draft: DraftPreview, showOrganizerTime: boolean): InteractionResponse {
+function draftMessage(draft: DraftPreview, showOrganizerTime: boolean, defaultDuration = false): InteractionResponse {
   const { session, revision, shareName, availability } = draft;
   const code = `${session.id}:${revision}`;
   const time = new Intl.DateTimeFormat('en-US', { timeStyle: 'short', timeZone: 'UTC' });
@@ -156,6 +156,7 @@ function draftMessage(draft: DraftPreview, showOrganizerTime: boolean): Interact
   ] : [
     `${timestamp(draft.session.startAt)} → ${timestamp(draft.session.endAt)}`,
     showOrganizerTime ? `Organizer’s time · ${organizerWindow(draft.session)}` : '',
+    defaultDuration ? 'Default duration · 2 hours (edit to change)' : '',
   ];
   return message([
     '**Private draft — review before publishing**',
@@ -359,9 +360,10 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
         const share = name === 'create' && fromText ? false : boolOption(values, 'share');
         const weekend = request === undefined ? undefined : parseWeekendText(request, referenceMs);
         if (weekend) return draftMessage(store.createWeekendDraft(actor, { ...TEXT_DRAFT_DEFAULTS, ...weekend }, share), true);
-        const input: SessionInput = request !== undefined ? {
+        const parsed = request === undefined ? undefined : parseScheduleText(request, referenceMs);
+        const input: SessionInput = parsed !== undefined ? {
           ...TEXT_DRAFT_DEFAULTS,
-          ...parseScheduleText(request, referenceMs),
+          ...parsed,
         } : {
           activity: textOption(values, 'activity'), startAt: textOption(values, 'start'), endAt: textOption(values, 'end'),
           timeZone: textOption(values, 'timezone'),
@@ -369,7 +371,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
           platformNotes: textOption(values, 'platform_notes', 'Check platform and cross-play settings together.'),
         };
         const session = store.createDraft(actor, input, share);
-        return draftMessage({ session, revision: 0, shareName: share }, fromText);
+        return draftMessage({ session, revision: 0, shareName: share }, fromText, parsed?.defaultDuration);
       }
       if (name === 'edit-draft') {
         const { id, revision } = draftReference(values.get('draft'));
@@ -425,7 +427,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
       const { id, revision } = draftReference(reference);
       const fields = modalInputs(data, EDIT_FIELDS);
       const request = fields.get('request')?.trim();
-      const schedule = request ? parseScheduleText(request, referenceMs) : {};
+      const { defaultDuration, ...schedule } = request ? parseScheduleText(request, referenceMs) : { defaultDuration: undefined };
       const activity = fields.get('activity')?.trim();
       const platformNotes = fields.get('platform');
       const seats = fields.get('capacity')?.trim();
@@ -441,7 +443,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
         ...(capacity === undefined ? {} : { capacity }),
         ...(activity ? { activity } : {}),
         ...(platformNotes === undefined ? {} : { platformNotes }),
-      }), true);
+      }), true, defaultDuration);
     }
     if (action === 'draft-page') {
       if (!/^\d+$/.test(reference)) throw new InputError('Choose a positive draft page number.');

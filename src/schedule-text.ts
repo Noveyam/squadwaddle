@@ -6,7 +6,7 @@ export const SCHEDULE_TEXT_EXAMPLE = 'Two more for Marathon on Friday from noon 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 // Recognize incomplete requests so each missing detail can get its own hint.
 const CLOCK = '(noon|(?:0?[1-9]|1[0-2])(?::[0-5]\\d)?(?: ?[ap]m)?)';
-const WINDOW = `(?:from )?${CLOCK}(?:(?: to| ?[–—-])(?: ?${CLOCK})?)?`;
+const WINDOW = `(?:(?:from|at) )?${CLOCK}(?:( to| ?[–—-])(?: ?${CLOCK})?)?`;
 const INTRO = /^(?:(?:i need|need) )?(?:(.+?) for |for )?marathon (?:on )?/i;
 const NUMBER_WORDS = 'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty'.split(' ');
 const SIZE_NUMBER = `(?:[+-]?\\d+(?:\\.\\d+)?|${NUMBER_WORDS.join('|')}|dozen)`;
@@ -20,6 +20,7 @@ const PATTERN = new RegExp(
 );
 const WEEKEND = new RegExp(`^all weekend(?: ${WINDOW})?,?(?: (?:in )?${ZONE})?(?: for (.+))?$`, 'i');
 const MINUTE_MS = 60_000;
+const DEFAULT_DURATION_MS = 120 * MINUTE_MS;
 const DAY_MS = 24 * 60 * MINUTE_MS;
 
 export class ScheduleTextError extends Error {}
@@ -117,7 +118,7 @@ export function parseWeekendText(sentence: string, referenceMs: number):
   const { body, capacity } = scheduleRequest(sentence);
   const match = body !== undefined && WEEKEND.exec(body);
   if (!match) return undefined;
-  const [, start, end, zone, activity] = match;
+  const [, start, , end, zone, activity] = match;
   const timeZone = selectedZone(zone);
   if (activity !== undefined) checkActivityName(activity);
   const { today } = calendarToday(timeZone, referenceMs);
@@ -139,22 +140,22 @@ export function parseWeekendText(sentence: string, referenceMs: number):
 }
 
 export function parseScheduleText(sentence: string, referenceMs: number):
-  Omit<DraftSchedule, 'activity'> & { activity?: string; capacity?: number } {
+  Omit<DraftSchedule, 'activity'> & { activity?: string; capacity?: number; defaultDuration?: true } {
   const { body, capacity } = scheduleRequest(sentence);
-  if (body !== undefined && WEEKEND.test(body)) throw new ScheduleTextError('Pick one day and exact start and end times for this edit.');
+  if (body !== undefined && WEEKEND.test(body)) throw new ScheduleTextError('Pick one day and a start time for this edit.');
   const match = body !== undefined && PATTERN.exec(body);
   if (!match) {
-    throw new ScheduleTextError(`Try “${SCHEDULE_TEXT_EXAMPLE}” Use a full weekday or YYYY-MM-DD, noon or h:mm am/pm for each time, and Pacific, America/Los_Angeles, or UTC. The final “for …” activity is optional. For other formats, use /session create.`);
+    throw new ScheduleTextError(`Try “${SCHEDULE_TEXT_EXAMPLE}” Use a full weekday or YYYY-MM-DD, noon or h:mm am/pm for the start and any end time, and Pacific, America/Los_Angeles, or UTC. The final “for …” activity is optional. For other formats, use /session create.`);
   }
 
-  const [, day, start, end, zone, activity] = match;
-  if (!end) throw new ScheduleTextError('Include an end time after the start, such as “to 1:30 pm”.');
+  const [, day, start, separator, end, zone, activity] = match;
+  if (separator && !end) throw new ScheduleTextError('Include an end time after the start, such as “to 1:30 pm”.');
   const startMinute = minutesSinceMidnight(start.toLowerCase(), 'start');
-  const endMinute = minutesSinceMidnight(end.toLowerCase(), 'end');
-  if (!zone) throw new ScheduleTextError('Add a time zone after the end time. Use Pacific, America/Los_Angeles, or UTC.');
+  const endMinute = end === undefined ? undefined : minutesSinceMidnight(end.toLowerCase(), 'end');
+  if (!zone) throw new ScheduleTextError('Add a time zone after the ' + (end === undefined ? 'start' : 'end') + ' time. Use Pacific, America/Los_Angeles, or UTC.');
   if (activity !== undefined) checkActivityName(activity);
   const timeZone = selectedZone(zone);
-  if (endMinute <= startMinute) throw new ScheduleTextError('Choose an end after the start on the same day.');
+  if (endMinute !== undefined && endMinute <= startMinute) throw new ScheduleTextError('Choose an end after the start on the same day.');
 
   const { formatter, today } = calendarToday(timeZone, referenceMs);
   const midnight = scheduledDate(day.toLowerCase(), today);
@@ -165,7 +166,8 @@ export function parseScheduleText(sentence: string, referenceMs: number):
   const offsets = new Set([midnight - DAY_MS, midnight + DAY_MS]
     .map(instant => wallTime(formatter, instant) - instant));
   const startMs = resolveTime(midnight + startMinute * MINUTE_MS, offsets, formatter, 'start time');
-  const endMs = resolveTime(midnight + endMinute * MINUTE_MS, offsets, formatter, 'end time');
+  const endMs = endMinute === undefined ? startMs + DEFAULT_DURATION_MS
+    : resolveTime(midnight + endMinute * MINUTE_MS, offsets, formatter, 'end time');
   if (startMs <= referenceMs) {
     throw new ScheduleTextError('That start time has passed. Choose a later time or enter a future date as YYYY-MM-DD.');
   }
@@ -173,6 +175,7 @@ export function parseScheduleText(sentence: string, referenceMs: number):
   return {
     ...(activity === undefined ? {} : { activity }),
     ...(capacity === undefined ? {} : { capacity }),
+    ...(endMinute === undefined ? { defaultDuration: true } : {}),
     startAt: new Date(startMs).toISOString(),
     endAt: new Date(endMs).toISOString(),
     timeZone,

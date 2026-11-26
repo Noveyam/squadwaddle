@@ -76,7 +76,7 @@ A full weekday also works. If you omit the activity, the draft uses **Group play
 
 Calendar dates must be in `YYYY-MM-DD` format. A weekday resolves to its first occurrence on or after today in the selected zone. The command rejects impossible dates, past dates, starts at or before the current time, and times skipped or repeated by daylight saving. If today's start has passed, choose a later time or enter a future date.
 
-Give the start and end on the same day, using `noon`, `h am/pm`, or `h:mm am/pm` for each. Supported zones are `Pacific` (the same as `America/Los_Angeles`) and `UTC`. Discord timestamps display in each viewer’s local zone. For example, Friday noon–3 pm UTC on November 27, 2026 appears as 4–7 am Pacific.
+Give a start time. If you omit the end, the draft shows an editable two-hour default. For example, `Marathon on Friday at 7 pm Pacific` drafts 7–9 pm Pacific. If you enter both times, give them on the same day, using `noon`, `h am/pm`, or `h:mm am/pm` for each. Supported zones are `Pacific` (the same as `America/Los_Angeles`) and `UTC`. Discord timestamps display in each viewer’s local zone. For example, Friday noon–3 pm UTC on November 27, 2026 appears as 4–7 am Pacific.
 
 If AM or PM, the end time, or the time zone is missing from a recognized exact-time sentence, the command sends a private hint about what to add.
 

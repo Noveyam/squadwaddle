@@ -229,15 +229,36 @@ test('text draft errors are private and leave the store untouched', () => {
   assert.deepEqual(store.calls, []);
 });
 
+test('a start-only request defaults to two elapsed hours and labels the private draft', () => {
+  const store = new FakeStore();
+  const now = Date.parse('2026-11-25T12:00:00Z');
+  const reply = messageData(handleInteraction(command('create', {
+    request: 'Marathon on Friday at 7 pm Pacific for Expedition.',
+  }), store, PILOT, now));
+  assert.equal(reply.flags! & EPHEMERAL, EPHEMERAL);
+  assert.match(reply.content, /Default duration · 2 hours/);
+  assert.match(reply.content, /1\/3 players/);
+  assert.equal(store.session.startAt, '2026-11-28T03:00:00.000Z');
+  assert.equal(store.session.endAt, '2026-11-28T05:00:00.000Z');
+
+  const overnight = new FakeStore();
+  handleInteraction(command('create', { request: 'Marathon Friday at 11 pm UTC.' }), overnight, PILOT, now);
+  assert.equal(overnight.session.endAt, '2026-11-28T01:00:00.000Z');
+
+  const explicit = new FakeStore();
+  const exact = messageData(handleInteraction(command('create', { request: TEXT_REQUEST }), explicit, PILOT, now));
+  assert.doesNotMatch(exact.content, /Default duration/);
+  assert.equal(Date.parse(explicit.session.endAt) - Date.parse(explicit.session.startAt), 90 * 60_000);
+});
+
 test('incomplete scheduling sentences get a private correction and save only after a valid retry', () => {
   const referenceMs = Date.parse('2026-11-25T12:00:00Z');
   const store = new FakeStore();
   const cases = [
     { request: TEXT_REQUEST.replace('from noon', 'from 12:00'), hint: /Add AM or PM to the start time/ },
     { request: TEXT_REQUEST.replace('1:30 pm', '1:30'), hint: /Add AM or PM to the end time/ },
-    { request: TEXT_REQUEST.replace(' to 1:30 pm', ''), hint: /Include an end time/ },
     { request: TEXT_REQUEST.replace('1:30 pm ', ''), hint: /Include an end time/ },
-    { request: TEXT_REQUEST.replace(' to 1:30 pm Pacific', ''), hint: /Include an end time/ },
+    { request: TEXT_REQUEST.replace(' to 1:30 pm Pacific', ''), hint: /Add a time zone after the start time/ },
     { request: TEXT_REQUEST.replace(' Pacific', ''), hint: /Add a time zone after the end time/ },
     { request: DATED_REQUEST.replace('Pacific.', 'for Expedition practice.'), hint: /Add a time zone after the end time/ },
   ];
