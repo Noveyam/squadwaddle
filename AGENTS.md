@@ -8,7 +8,7 @@ Read README.md and docs/PRODUCT.md before changing scope. Read docs/NEXT-STEPS.m
 
 ## Accepted requirements
 
-- First format: three total seats including the host. This is our pilot format, not a claim that every activity requires three players.
+- Group size is 2–8 total seats including the host, with a default of three. The size is a coordination choice and does not verify the game's activity limits.
 - Explicit start and end, a real IANA time zone, and a clear finish expectation.
 - Create privately, preview, then explicitly publish. Never post merely because AI extracted a request.
 - Identity comes from authenticated Discord interactions. Never trust user-supplied acting IDs.

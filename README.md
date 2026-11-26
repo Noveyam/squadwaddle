@@ -1,6 +1,6 @@
 # SquadWaddle
 
-A first code starter for Novey's Discord app: arrange a relaxed **Marathon** session with a clear start and finish, three seats including the host, and optional Bungie Name sharing.
+A first code starter for Novey's Discord app: arrange a relaxed **Marathon** session with a clear start and finish, a host-chosen group size, and optional Bungie Name sharing.
 
 **Private prototype.** The demo and automated tests use fictional data and run without credentials or an npm install. In the private test server, the registered `/session profile` command returned a private reply. Multi-player testing is pending.
 
@@ -24,40 +24,85 @@ npm run demo
 
 There is no `npm install` step. The demo uses fictional players and a fixed example clock, prints the session flow in the terminal, and sends nothing to any external service.
 
+## Offline solo rehearsal
+
+From the `Discord Group Bot` folder in the VS Code terminal, run this command. It selects the Node 24 runtime already available on this Mac.
+
+```sh
+PATH="/Applications/ChatGPT.app/Contents/Resources/cua_node/bin:$PATH" npm --prefix next-session run rehearsal
+```
+
+The rehearsal plays all roles with fictional users and a fresh in-memory database. It sends signed interactions through local streams without opening a network port. It starts with a dated `/session create` request for **Expedition practice** and checks the private preview, host-only Publish, both join choices, shared-name access, and confirmed cancellation. Look for `✔ offline solo rehearsal`, the `PASS` checkpoints, and `fail 0`.
+
 ## What this increment implements
 
 | Capability | Behavior |
 | --- | --- |
-| Session draft | Explicit activity, start, end, IANA time zone, expectations and platform notes; private preview before publishing |
-| Capacity | Three seats total including the host, enforced transactionally |
+| Session draft | Private preview from one supported Marathon scheduling sentence |
+| Draft editing | The host can correct an unpublished draft and review the updated version before publishing |
+| Draft recovery | The host can find and reopen a lost private preview from the original channel |
+| Capacity | 2–8 total seats including the host, with a default of three. The stored limit is enforced transactionally. |
 | Joining | Join with optional sharing, or join without a saved game name |
 | Leaving | Frees a seat and ends future access to that session's group IDs |
 | Name profile | Save, view or clear your own self-reported full Bungie Name |
 | Session consent | Sharing is a separate choice for every session; repeated Join clicks cannot change that choice |
 | Private group list | Current confirmed participants can retrieve only names whose owners opted in |
-| Discovery | Lists real open, unended sessions in the configured Discord channel |
-| Cancellation | Host can cancel; future joins and group-ID lookups are denied |
+| Discovery | Lists open sessions in the configured channel and links to the original channel card once observed |
+| Cancellation | The host confirms cancellation. The card can refresh in place and further joins and group-ID lookups are denied. |
 | Persistence | SQLite stores profiles, sessions and membership across restarts |
-| Discord endpoint | Verifies signed requests before parsing them; limits access to one configured guild and channel |
+| Discord endpoint | Verifies requests before parsing and accepts signed interactions only from approved guild/channel pairs |
 
 Public cards contain no Bungie Names. The host uses the same sharing rules as every other participant. A participant choosing **Join only** takes responsibility for arranging their in-game connection with the host.
 
 ## Included Discord commands
 
-The private test server has the guild-scoped `/session` command. It needs a running interaction endpoint to respond.
+The locally tested command definition exposes three choices. The private test server’s registered menu needs a separately authorized update to show them.
 
 | Command | Purpose |
 | --- | --- |
-| `/session profile` | Privately view your saved name |
-| `/session profile bungie_name:ExampleRunner#1234` | Save or change your own name |
-| `/session profile clear:true` | Remove your saved name and all your stored sharing snapshots |
-| `/session create` | Create a private draft; review it, then choose Publish or Discard |
+| `/session create` | Enter one scheduling sentence and review a private draft |
 | `/session find` | Open a real session in this channel and deliberately choose whether to join |
-| `/session share session:<id> enabled:true` | Share or refresh your saved name for a joined session |
-| `/session share session:<id> enabled:false` | Revoke future name access for that session |
-| `/session cancel session:<id>` | Cancel a session you host |
+| `/session help` | See an example and open **My drafts** or **My Bungie ID** privately |
 
-The first implementation uses structured command fields. Example time values are `2026-12-12T12:00:00-08:00` and `2026-12-12T13:30:00-08:00`, with zone `America/Los_Angeles`. Use a future date when testing live. Discord timestamps display in the viewer's local zone; the card also records the organizer's source zone. Natural-language input will replace most repeated input in a later increment.
+### Create from a sentence
+
+Enter a sentence in the `request` field on `/session create`. Use a calendar date for a session more than a week away.
+
+> Two more for Marathon on 2026-12-11 from 6:30 pm to 8:00 pm Pacific for Expedition practice.
+
+A full weekday also works. If you omit the activity, the draft uses **Group play**.
+
+> Two more for Marathon on Saturday from noon to 1:30 pm Pacific.
+
+Calendar dates must be in `YYYY-MM-DD` format. A weekday resolves to its first occurrence on or after today in the selected zone. The command rejects impossible dates, past dates, starts at or before the current time, and times skipped or repeated by daylight saving. If today's start has passed, choose a later time or enter a future date.
+
+Give the start and end on the same day, using `noon`, `h am/pm`, or `h:mm am/pm` for each. Supported zones are `Pacific` (the same as `America/Los_Angeles`) and `UTC`. Discord timestamps display in each viewer’s local zone. For example, Friday noon–3 pm UTC on November 27, 2026 appears as 4–7 am Pacific.
+
+If AM or PM, the end time, or the time zone is missing from a recognized exact-time sentence, the command sends a private hint about what to add.
+
+To name the activity, add `for` and the activity name after the zone. The whole sentence can be up to 160 characters. The activity is visible on the channel card after publishing, so keep Bungie Names out of it.
+
+Group size defaults to three seats including you. Say “two more” for three total, “three more” or “four players total” for four, or “six players total” for six. Put the count before “for Marathon” or add it at the end with “with,” as in “Marathon Friday noon–3 pm UTC with 6 players total.” Use 2–8 total seats. A bare count such as “four players” gets a private clarification.
+
+Use **Edit** to change the sentence, activity, platform, or **Total seats including you**. Review the new preview before pressing **Publish**. Leaving the seat field blank keeps the current size unless the replacement sentence names a new one. A size edit keeps the session’s sharing choice. **Share my Bungie ID** starts at **No**. Choosing **Yes** uses the name you saved privately under **My Bungie ID**.
+
+### Draft the weekend
+
+> Two more for Marathon all weekend in Pacific for Expedition practice.
+
+The private draft records Saturday and Sunday in the selected zone. Hours are flexible when omitted. If you include hours, they show as a preference for each day. Use **Edit** to supply an exact-time sentence for one day of that weekend in the same zone. The updated preview keeps the draft, seat count, and sharing choice unless you explicitly change the count. Review it before pressing **Publish**.
+
+### Recover a private draft
+
+In the original channel, open **My drafts** from `/session help` or a draft preview. The private list shows up to five entries per page. Use **Next page** and **Open** to find the draft you want. The list shows schedules or weekend dates without names. Opening a draft displays its latest revision and sharing choice.
+
+### Join or cancel
+
+**Join** opens private choices to join with or without sharing. A confirmed member can use **Show group IDs** to manage their sharing. A host uses **Host Cancel**, then **Confirm cancellation**. The session closes immediately in SQLite. **Refresh**, or a later **Join** press on the public card, shows the cancellation on that same card.
+
+### Voice-room prototype
+
+The [offline voice lifecycle](docs/VOICE-ROOMS.md) passes the published session’s seat limit to a mock adapter. The Discord command menu and cards currently have no voice control.
 
 ## Development server configuration
 
@@ -71,6 +116,8 @@ npm start
 
 By default, the server listens at `127.0.0.1:3000`. `GET /health` returns only an availability check; `POST /interactions` accepts verified Discord interactions. The default database lives at `data/next-session.sqlite`.
 
+The single-pair settings `PILOT_GUILD_ID` and `PILOT_CHANNEL_ID` are the default. For fictional two-server testing, set `PILOT_ALLOWED_PAIRS` to a comma-separated list of `guild_id:channel_id` pairs. An explicit list replaces the default pair. [Two-server configuration and launch gates](docs/TWO-SERVER-BETA.md)
+
 Discord needs a reachable HTTPS interaction endpoint. Starting this local server alone does not connect Discord to it. A deliberate test setup must supply HTTPS routing, install the official app with appropriate permissions, configure the interaction endpoint, and register the guild-scoped command. The registration script modifies only this app's `/session` command in the chosen guild and is gated by `REGISTER_COMMANDS=yes`.
 
 ```bash
@@ -81,13 +128,17 @@ Until that environment setting is deliberately enabled and credentials are confi
 
 ## Important implementation limits
 
-This increment does **not** contain AI interpretation, voice, notifications, a waitlist, recurring sessions, external account linking, automatic in-game invitations, payments or personal ratings. It does not verify activity unlocks, game ownership, cross-play settings or anyone's account ownership.
+The prototype uses a local deterministic parser. Live voice, notifications, a waitlist, recurring sessions, external account linking, automatic in-game invitations, payments, and personal ratings remain future work. Game access, cross-play settings, and account ownership are unverified.
 
-When the host presses **Publish**, SQLite opens the draft and saves the Discord interaction ID and session ID in one transaction. If the app restarts using the same database file, a retry of that interaction gets a private acknowledgement. A second click on an already-open session also gets a private reply. An in-memory database lasts only until shutdown.
+When the host presses **Publish**, SQLite checks the preview revision, opens the draft, and saves the Discord interaction ID and session ID in one transaction. If the app restarts using the same database file, a retry of a successful Publish gets a private acknowledgement. An edit from an older revision is rejected even after restart. A second click on an already-open session also gets a private reply. An in-memory database lasts only until shutdown.
 
-If the app stops after committing but before Discord receives the public card, the session can appear in `/session find` even when the card is missing from the channel. Checking delivery and recovering that missing card remain future work. Other interaction types have process-local duplicate protection. Joining through a private search result or cancelling a session can leave the original card stale until someone presses **Refresh**.
+When someone presses a button on the public card, the app checks the message against its saved Publish interaction. A match lets it save the message ID and show **Open channel card** in private search results and the host's cancellation reply. Joining or leaving on the channel card updates its roster immediately. People can still open a private session preview and join either way if the link is unavailable.
+
+If the app stops after saving the session but before Discord receives the card, the session can appear in `/session find` with no channel card. An untouched card may also have no recorded link. Recovery of missing or deleted cards remains open. A join through a private preview or a cancellation can leave the channel card stale until someone presses **Refresh**. Other interaction types have process-local duplicate protection.
 
 The database is ordinary local SQLite, readable by the app operator. Clearing a name removes it from active records and sharing snapshots; this does not recall messages, screenshots or copies already made. Automatic data expiry, full account deletion and production backup/deletion behavior remain to be designed. No real participant dataset is bundled.
+
+Saved Bungie Name profiles are still keyed globally by Discord user ID, and clearing a profile affects that user’s snapshots across guilds. The [guild-scoped profile migration](docs/TWO-SERVER-BETA.md#planned-guild-scoped-profile-cutover) is required before a real two-server beta.
 
 See [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md) for the next milestone, [docs/PRODUCT.md](docs/PRODUCT.md) for accepted product decisions, and [VALIDATION.md](VALIDATION.md) for what was actually checked.
 
@@ -96,6 +147,9 @@ See [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md) for the next milestone, [docs/PRODU
 ```text
 src/store.ts                 Session rules and SQLite persistence
 src/types.ts                 Domain contracts and public/private data shapes
+src/schedule-text.ts         Deterministic parser for short Marathon scheduling requests
+src/voice-rooms.ts           Offline, opt-in voice lifecycle for mocked adapters
+src/voice-room-registry.ts   Local SQLite links and provisioning receipts for mocked rooms
 src/discord.ts               Slash commands, buttons and response rendering
 src/server.ts                Signed HTTP interaction endpoint
 src/demo.ts                  Fictional local walkthrough

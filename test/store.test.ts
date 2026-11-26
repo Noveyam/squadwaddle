@@ -453,7 +453,7 @@ test("profiles, consent snapshots, membership, and cancellation survive reopenin
     store = new SessionStore(databasePath, now);
     store.saveProfile(HOST, HOST_NAME);
     store.saveProfile(ALICE, ALICE_NAME);
-    const session = openSession(store, HOST, true);
+    const session = store.publish(HOST, store.createDraft(HOST, { ...INPUT, capacity: 6 }, true).id);
     store.join(ALICE, session.id, false);
     const cancelled = openSession(store, HOST, true);
     store.cancel(HOST, cancelled.id);
@@ -467,6 +467,7 @@ test("profiles, consent snapshots, membership, and cancellation survive reopenin
     assert.deepEqual(store.getProfile(ALICE), { bungieName: ALICE_NAME });
     const reopened = store.getSession(HOST, session.id);
     assert.equal(reopened.status, "open");
+    assert.equal(reopened.capacity, 6);
     assert.deepEqual(new Set(reopened.members.map((member) => member.userId)),
       new Set([HOST.userId, ALICE.userId]));
     assert.deepEqual(namesByUser(store, ALICE, session.id), {

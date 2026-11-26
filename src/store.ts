@@ -1,11 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { CAPACITY_HINT, DEFAULT_CAPACITY, MAX_CAPACITY, MIN_CAPACITY, isValidCapacity } from "./capacity.ts";
 import type {
   Actor,
+  DraftEdit,
+  DraftListPage,
+  DraftPreview,
+  DraftSchedule,
   GroupMember,
   PublicSession,
   SessionInput,
   SessionStoreContract,
+  WeekendAvailability,
+  WeekendDraftInput,
 } from "./types.ts";
 
 /** A predictable application error; callers must not return raw database errors. */
@@ -32,7 +39,10 @@ type SessionRow = {
   time_zone: string;
   expectations: string;
   platform_notes: string;
+  capacity: number;
   status: "draft" | "open" | "cancelled";
+  draft_revision: number;
+  message_id: string | null;
 };
 
 type MemberRow = {
@@ -40,11 +50,26 @@ type MemberRow = {
   is_host: number;
   shared_name: string | null;
 };
+type WeekendRow = Pick<SessionRow, 'id' | 'guild_id' | 'channel_id' | 'host_user_id' | 'activity' |
+  'expectations' | 'time_zone' | 'platform_notes' | 'capacity' | 'draft_revision'> & {
+  saturday: string; sunday: string;
+  preferred_start: number | null; preferred_end: number | null;
+  shared_name: string | null;
+};
 
-const CAPACITY = 3;
+const CAPACITY_COLUMN = `capacity INTEGER NOT NULL DEFAULT ${DEFAULT_CAPACITY}
+  CHECK (typeof(capacity) = 'integer' AND capacity BETWEEN ${MIN_CAPACITY} AND ${MAX_CAPACITY})`;
+const DRAFTS_PER_PAGE = 5;
+const SESSION_WITH_CARD = `SELECT sessions.*, public_cards.message_id FROM sessions
+  LEFT JOIN public_cards ON public_cards.session_id = sessions.id`;
 
 function fail(code: string, message: string): never {
   throw new DomainError(code, message);
+}
+
+function validateCapacity(value: unknown = DEFAULT_CAPACITY): number {
+  if (!isValidCapacity(value)) fail("INVALID_CAPACITY", CAPACITY_HINT);
+  return value;
 }
 
 function validateActor(actor: Actor): void {
@@ -118,6 +143,41 @@ function validateTimeZone(value: unknown): string {
   }
 }
 
+function validateDraftSchedule(input: Partial<DraftSchedule>, saved?: SessionRow) {
+  const activity = input.activity === undefined && saved ? saved.activity : textField(input.activity, "Activity", 160, true);
+  const start = input.startAt === undefined && saved
+    ? { iso: saved.start_at, milliseconds: saved.start_ms }
+    : parseInstant(input.startAt, "Start time");
+  const end = input.endAt === undefined && saved
+    ? { iso: saved.end_at, milliseconds: saved.end_ms }
+    : parseInstant(input.endAt, "End time");
+  const timeZone = input.timeZone === undefined && saved ? saved.time_zone : validateTimeZone(input.timeZone);
+  if (end.milliseconds <= start.milliseconds) fail("VALIDATION_ERROR", "End time must be after start time.");
+  return { activity, start, end, timeZone };
+}
+
+function localDate(instant: number, timeZone: string): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+  const { year, month, day } = Object.fromEntries(formatter.formatToParts(instant).map(part => [part.type, part.value]));
+  return `${year.padStart(4, "0")}-${month}-${day}`;
+}
+
+function validateWeekend(availability: WeekendAvailability, now: number): string {
+  if (!availability || typeof availability !== "object") fail("VALIDATION_ERROR", "Choose weekend dates.");
+  const { saturday, sunday, preferredStartMinute: start, preferredEndMinute: end } = availability;
+  const timeZone = validateTimeZone(availability.timeZone);
+  const first = parseInstant(`${saturday}T00:00:00Z`, "Saturday").milliseconds;
+  const last = parseInstant(`${sunday}T00:00:00Z`, "Sunday").milliseconds;
+  if (new Date(first).getUTCDay() !== 6 || last - first !== 86_400_000 || sunday < localDate(now, timeZone)) {
+    fail("VALIDATION_ERROR", "Choose a Saturday and its following Sunday.");
+  }
+  if ((start !== undefined || end !== undefined) && (start === undefined || end === undefined ||
+      !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end >= 1440 || start >= end)) {
+    fail("VALIDATION_ERROR", "Choose valid preferred hours.");
+  }
+  return timeZone;
+}
+
 /**
  * Synchronous, persistent session rules. The transport supplies Actor from a
  * verified interaction, never from command text or a caller-chosen user ID.
@@ -151,12 +211,18 @@ export class SessionStore implements SessionStoreContract {
         time_zone TEXT NOT NULL,
         expectations TEXT NOT NULL,
         platform_notes TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('draft', 'open', 'cancelled'))
+        status TEXT NOT NULL CHECK (status IN ('draft', 'open', 'cancelled')),
+        draft_revision INTEGER NOT NULL DEFAULT 0,
+        ${CAPACITY_COLUMN}
       );
       CREATE INDEX IF NOT EXISTS sessions_scope_time ON sessions (guild_id, channel_id, status, end_ms);
       CREATE TABLE IF NOT EXISTS publish_receipts (
         interaction_id TEXT PRIMARY KEY NOT NULL,
         session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS public_cards (
+        session_id TEXT PRIMARY KEY NOT NULL REFERENCES publish_receipts(session_id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL UNIQUE
       );
       CREATE TABLE IF NOT EXISTS members (
         join_order INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,7 +233,37 @@ export class SessionStore implements SessionStoreContract {
         UNIQUE (session_id, user_id)
       );
       CREATE INDEX IF NOT EXISTS members_user ON members (user_id);
+      CREATE TABLE IF NOT EXISTS weekend_drafts (
+        id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        host_user_id TEXT NOT NULL,
+        activity TEXT NOT NULL,
+        time_zone TEXT NOT NULL,
+        expectations TEXT NOT NULL,
+        platform_notes TEXT NOT NULL,
+        saturday TEXT NOT NULL,
+        sunday TEXT NOT NULL,
+        preferred_start INTEGER,
+        preferred_end INTEGER,
+        shared_name TEXT,
+        draft_revision INTEGER NOT NULL DEFAULT 0,
+        ${CAPACITY_COLUMN}
+      );
+      CREATE INDEX IF NOT EXISTS weekend_draft_scope ON weekend_drafts (guild_id, channel_id, host_user_id);
     `);
+    this.transaction(() => {
+      const columns = this.db.prepare("PRAGMA table_info(sessions)").all();
+      if (!columns.some(column => column.name === "draft_revision")) {
+        this.db.exec("ALTER TABLE sessions ADD COLUMN draft_revision INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!columns.some(column => column.name === "capacity")) {
+        this.db.exec(`ALTER TABLE sessions ADD COLUMN ${CAPACITY_COLUMN}`);
+      }
+      if (!this.db.prepare("PRAGMA table_info(weekend_drafts)").all().some(column => column.name === "capacity")) {
+        this.db.exec(`ALTER TABLE weekend_drafts ADD COLUMN ${CAPACITY_COLUMN}`);
+      }
+    });
   }
 
   private ensureOpen(): void {
@@ -182,7 +278,7 @@ export class SessionStore implements SessionStoreContract {
     return value.getTime();
   }
 
-  /** All roster changes acquire a SQLite write lock before checking capacity. */
+  /** Acquire the SQLite write lock before checking state for a mutation. */
   private transaction<T>(work: () => T): T {
     this.ensureOpen();
     this.db.exec("BEGIN IMMEDIATE");
@@ -200,7 +296,7 @@ export class SessionStore implements SessionStoreContract {
     this.ensureOpen();
     validateActor(actor);
     if (typeof id !== "string" || id.length < 1 || id.length > 128) fail("NOT_FOUND", "Session not found in this channel.");
-    const row = this.db.prepare("SELECT * FROM sessions WHERE id = ? AND guild_id = ? AND channel_id = ?")
+    const row = this.db.prepare(`${SESSION_WITH_CARD} WHERE id = ? AND guild_id = ? AND channel_id = ?`)
       .get(id, actor.guildId, actor.channelId) as SessionRow | undefined;
     if (!row || (hideDraft && row.status === "draft" && row.host_user_id !== actor.userId)) {
       fail("NOT_FOUND", "Session not found in this channel.");
@@ -224,6 +320,51 @@ export class SessionStore implements SessionStoreContract {
     if (this.clock() >= row.end_ms) fail("SESSION_ENDED", "This session has ended.");
   }
 
+  private ownedDraft(actor: Actor, id: string): SessionRow {
+    const row = this.session(actor, id);
+    if (row.host_user_id !== actor.userId) fail("NOT_FOUND", "Draft not found in this channel.");
+    if (row.status !== "draft") fail("NOT_A_DRAFT", "Only unpublished drafts can be edited.");
+    return row;
+  }
+
+  private requireDraftRevision(row: Pick<SessionRow, "draft_revision">, expectedRevision: number): void {
+    if (row.draft_revision !== expectedRevision) fail("STALE_DRAFT", "That draft preview is out of date.");
+  }
+
+  private draftPreview(row: SessionRow): DraftPreview {
+    return {
+      session: this.publicSession(row),
+      revision: row.draft_revision,
+      shareName: this.member(row.id, row.host_user_id)?.shared_name != null,
+    };
+  }
+
+  private weekendDraft(actor: Actor, id: string): WeekendRow | undefined {
+    this.ensureOpen();
+    validateActor(actor);
+    if (typeof id !== "string" || id.length < 1 || id.length > 128) return undefined;
+    return this.db.prepare("SELECT * FROM weekend_drafts WHERE id = ? AND guild_id = ? AND channel_id = ? AND host_user_id = ?")
+      .get(id, actor.guildId, actor.channelId, actor.userId) as WeekendRow | undefined;
+  }
+
+  private weekendPreview(row: WeekendRow): DraftPreview {
+    return {
+      session: {
+        id: row.id, game: "Marathon", guildId: row.guild_id, channelId: row.channel_id, hostUserId: row.host_user_id,
+        activity: row.activity, timeZone: row.time_zone, expectations: row.expectations, platformNotes: row.platform_notes,
+        capacity: row.capacity, status: "draft", members: [{ userId: row.host_user_id, isHost: true }],
+      },
+      revision: row.draft_revision,
+      shareName: row.shared_name !== null,
+      availability: {
+        saturday: row.saturday, sunday: row.sunday, timeZone: row.time_zone,
+        ...(row.preferred_start === null || row.preferred_end === null ? {} : {
+          preferredStartMinute: row.preferred_start, preferredEndMinute: row.preferred_end,
+        }),
+      },
+    };
+  }
+
   private sharedName(userId: string, shareName: boolean): string | null {
     if (!shareName) return null;
     const profile = this.db.prepare("SELECT bungie_name FROM profiles WHERE user_id = ?").get(userId) as { bungie_name: string } | undefined;
@@ -241,13 +382,14 @@ export class SessionStore implements SessionStoreContract {
       guildId: row.guild_id,
       channelId: row.channel_id,
       hostUserId: row.host_user_id,
+      ...(row.message_id ? { publicMessageId: row.message_id } : {}),
       activity: row.activity,
       startAt: row.start_at,
       endAt: row.end_at,
       timeZone: row.time_zone,
       expectations: row.expectations,
       platformNotes: row.platform_notes,
-      capacity: CAPACITY,
+      capacity: row.capacity,
       status: row.status,
       members: members.map(member => ({ userId: member.user_id, isHost: member.is_host === 1 })),
     };
@@ -275,36 +417,145 @@ export class SessionStore implements SessionStoreContract {
     this.transaction(() => {
       this.db.prepare("DELETE FROM profiles WHERE user_id = ?").run(actor.userId);
       this.db.prepare("UPDATE members SET shared_name = NULL WHERE user_id = ?").run(actor.userId);
+      this.db.prepare("UPDATE weekend_drafts SET shared_name = NULL WHERE host_user_id = ?").run(actor.userId);
     });
+  }
+
+  private insertTimedDraft(actor: Actor, id: string, schedule: ReturnType<typeof validateDraftSchedule>,
+    expectations: string, platform: string, snapshot: string | null, revision: number, capacity: number): PublicSession {
+    const { activity, start, end, timeZone } = schedule;
+    this.db.prepare(`INSERT INTO sessions
+      (id, guild_id, channel_id, host_user_id, activity, start_at, end_at, start_ms, end_ms, time_zone, expectations, platform_notes, status, draft_revision, capacity)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`)
+      .run(id, actor.guildId, actor.channelId, actor.userId, activity, start.iso, end.iso, start.milliseconds, end.milliseconds,
+        timeZone, expectations, platform, revision, capacity);
+    this.db.prepare("INSERT INTO members (session_id, user_id, is_host, shared_name) VALUES (?, ?, 1, ?)")
+      .run(id, actor.userId, snapshot);
+    return this.publicSession(this.session(actor, id));
   }
 
   createDraft(actor: Actor, input: SessionInput, shareName = false): PublicSession {
     validateActor(actor);
     validateSharing(shareName);
     if (!input || typeof input !== "object") fail("VALIDATION_ERROR", "Session details are required.");
-    const activity = textField(input.activity, "Activity", 160, true);
+    const schedule = validateDraftSchedule(input);
+    const capacity = validateCapacity(input.capacity);
     const expectations = textField(input.expectations, "Expectations", 1000);
     const platformNotes = textField(input.platformNotes, "Platform notes", 500);
-    const start = parseInstant(input.startAt, "Start time");
-    const end = parseInstant(input.endAt, "End time");
-    const timeZone = validateTimeZone(input.timeZone);
-    if (end.milliseconds <= start.milliseconds) fail("VALIDATION_ERROR", "End time must be after start time.");
     return this.transaction(() => {
-      if (start.milliseconds <= this.clock()) fail("VALIDATION_ERROR", "Choose a start time in the future.");
-      const snapshot = this.sharedName(actor.userId, shareName);
-      const id = randomUUID();
-      this.db.prepare(`INSERT INTO sessions
-        (id, guild_id, channel_id, host_user_id, activity, start_at, end_at, start_ms, end_ms, time_zone, expectations, platform_notes, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')`)
-        .run(id, actor.guildId, actor.channelId, actor.userId, activity, start.iso, end.iso, start.milliseconds, end.milliseconds, timeZone, expectations, platformNotes);
-      this.db.prepare("INSERT INTO members (session_id, user_id, is_host, shared_name) VALUES (?, ?, 1, ?)")
-        .run(id, actor.userId, snapshot);
-      return this.publicSession(this.session(actor, id));
+      if (schedule.start.milliseconds <= this.clock()) fail("VALIDATION_ERROR", "Choose a start time in the future.");
+      return this.insertTimedDraft(actor, randomUUID(), schedule, expectations, platformNotes,
+        this.sharedName(actor.userId, shareName), 0, capacity);
     });
   }
 
-  publish(actor: Actor, id: string, interactionId?: string): PublicSession {
+  createWeekendDraft(actor: Actor, input: WeekendDraftInput, shareName = false): DraftPreview {
+    validateActor(actor);
+    validateSharing(shareName);
+    const { availability } = input;
+    const capacity = validateCapacity(input.capacity);
+    const activity = textField(input.activity, "Activity", 160, true);
+    const expectations = textField(input.expectations, "Expectations", 1000);
+    const platform = textField(input.platformNotes, "Platform", 180);
     return this.transaction(() => {
+      const zone = validateWeekend(availability, this.clock());
+      const id = randomUUID();
+      this.db.prepare(`INSERT INTO weekend_drafts
+        (id, guild_id, channel_id, host_user_id, activity, time_zone, expectations, platform_notes,
+          saturday, sunday, preferred_start, preferred_end, shared_name, capacity)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, actor.guildId, actor.channelId, actor.userId, activity, zone, expectations, platform,
+          availability.saturday, availability.sunday, availability.preferredStartMinute ?? null,
+          availability.preferredEndMinute ?? null, this.sharedName(actor.userId, shareName), capacity);
+      return this.weekendPreview(this.weekendDraft(actor, id)!);
+    });
+  }
+
+  getDraft(actor: Actor, id: string): DraftPreview {
+    const weekend = this.weekendDraft(actor, id);
+    return weekend ? this.weekendPreview(weekend) : this.draftPreview(this.ownedDraft(actor, id));
+  }
+
+  listDrafts(actor: Actor, page: number): DraftListPage {
+    this.ensureOpen();
+    validateActor(actor);
+    if (!Number.isSafeInteger(page) || page < 1 || page > Math.floor(Number.MAX_SAFE_INTEGER / DRAFTS_PER_PAGE)) {
+      fail("INVALID_DRAFT_PAGE", "Choose a valid draft page number.");
+    }
+    const scope = [actor.guildId, actor.channelId, actor.userId] as const;
+    const rows = this.db.prepare(`SELECT id, startAt, endAt, timeZone, saturday, sunday FROM (
+      SELECT id, start_at AS startAt, end_at AS endAt, time_zone AS timeZone, NULL AS saturday, NULL AS sunday, start_ms AS sort_date
+        FROM sessions WHERE guild_id = ? AND channel_id = ? AND host_user_id = ? AND status = 'draft'
+      UNION ALL
+      SELECT id, NULL, NULL, time_zone, saturday, sunday, CAST(strftime('%s', saturday) AS INTEGER) * 1000
+        FROM weekend_drafts WHERE guild_id = ? AND channel_id = ? AND host_user_id = ?
+      ) ORDER BY sort_date ASC, id ASC LIMIT ? OFFSET ?`)
+      .all(...scope, ...scope, DRAFTS_PER_PAGE + 1, (page - 1) * DRAFTS_PER_PAGE) as DraftListPage["drafts"];
+    return { drafts: rows.slice(0, DRAFTS_PER_PAGE), hasMore: rows.length > DRAFTS_PER_PAGE };
+  }
+
+  /** Runs inside editDraft's transaction. Conversion keeps the draft ID and sharing snapshot. */
+  private editWeekend(actor: Actor, row: WeekendRow, changes: DraftEdit): DraftPreview {
+    const activity = changes.activity === undefined ? row.activity : textField(changes.activity, "Activity", 160, true);
+    const platform = changes.platformNotes === undefined ? row.platform_notes : textField(changes.platformNotes, "Platform", 180);
+    const capacity = changes.capacity === undefined ? row.capacity : validateCapacity(changes.capacity);
+    let snapshot = row.shared_name;
+    if (changes.shareName !== undefined) {
+      validateSharing(changes.shareName);
+      snapshot = this.sharedName(actor.userId, changes.shareName);
+    }
+    const timeZone = changes.timeZone === undefined ? row.time_zone : validateTimeZone(changes.timeZone);
+    if (timeZone !== row.time_zone) fail("WEEKEND_SLOT", "Use the weekend's selected time zone.");
+    if (changes.startAt !== undefined || changes.endAt !== undefined) {
+      const schedule = validateDraftSchedule({ ...changes, activity, timeZone });
+      const day = localDate(schedule.start.milliseconds, timeZone);
+      if ((day !== row.saturday && day !== row.sunday) || day !== localDate(schedule.end.milliseconds, timeZone)) {
+        fail("WEEKEND_SLOT", "Choose a single day within that weekend.");
+      }
+      if (schedule.start.milliseconds <= this.clock()) fail("VALIDATION_ERROR", "Choose a start time in the future.");
+      const revision = row.draft_revision + 1;
+      const session = this.insertTimedDraft(actor, row.id, schedule, row.expectations, platform, snapshot, revision, capacity);
+      this.db.prepare("DELETE FROM weekend_drafts WHERE id = ?").run(row.id);
+      return { session, revision, shareName: snapshot !== null };
+    }
+    this.db.prepare(`UPDATE weekend_drafts SET activity = ?, platform_notes = ?, shared_name = ?, capacity = ?,
+      draft_revision = draft_revision + 1 WHERE id = ?`).run(activity, platform, snapshot, capacity, row.id);
+    return this.weekendPreview(this.weekendDraft(actor, row.id)!);
+  }
+
+  editDraft(actor: Actor, id: string, expectedRevision: number, changes: DraftEdit): DraftPreview {
+    return this.transaction(() => {
+      const weekend = this.weekendDraft(actor, id);
+      if (weekend) {
+        this.requireDraftRevision(weekend, expectedRevision);
+        return this.editWeekend(actor, weekend, changes);
+      }
+      const row = this.ownedDraft(actor, id);
+      this.requireDraftRevision(row, expectedRevision);
+      const { activity, start, end, timeZone } = validateDraftSchedule(changes, row);
+      if (start.milliseconds <= this.clock()) fail("VALIDATION_ERROR", "Choose a start time in the future.");
+      const platform = changes.platformNotes === undefined ? row.platform_notes : textField(changes.platformNotes, "Platform", 180);
+      const capacity = changes.capacity === undefined ? row.capacity : validateCapacity(changes.capacity);
+      if (changes.shareName !== undefined) {
+        validateSharing(changes.shareName);
+        const snapshot = this.sharedName(actor.userId, changes.shareName);
+        this.db.prepare("UPDATE members SET shared_name = ? WHERE session_id = ? AND user_id = ?")
+          .run(snapshot, id, actor.userId);
+      }
+      this.db.prepare(`UPDATE sessions SET activity = ?, start_at = ?, end_at = ?, start_ms = ?, end_ms = ?,
+        time_zone = ?, platform_notes = ?, capacity = ?, draft_revision = draft_revision + 1 WHERE id = ?`)
+        .run(activity, start.iso, end.iso, start.milliseconds, end.milliseconds, timeZone, platform, capacity, id);
+      return this.draftPreview(this.session(actor, id));
+    });
+  }
+
+  publish(actor: Actor, id: string, interactionId?: string, expectedRevision = 0): PublicSession {
+    return this.transaction(() => {
+      const weekend = this.weekendDraft(actor, id);
+      if (weekend) {
+        this.requireDraftRevision(weekend, expectedRevision);
+        fail("EXACT_TIMES_REQUIRED", "Choose exact times before publishing.");
+      }
       // Preserve private draft visibility on the Discord button path.
       const row = this.session(actor, id, interactionId !== undefined);
       if (row.host_user_id !== actor.userId) fail("FORBIDDEN", "Only the host can publish this draft.");
@@ -318,6 +569,7 @@ export class SessionStore implements SessionStoreContract {
       }
       if (row.status === "open") fail("ALREADY_PUBLISHED", "This session is already published; do not post it again.");
       if (row.status !== "draft") fail("SESSION_NOT_OPEN", "A cancelled session cannot be published.");
+      this.requireDraftRevision(row, expectedRevision);
       if (row.start_ms <= this.clock()) fail("VALIDATION_ERROR", "The planned start has passed. Create a draft with a future start time.");
       this.db.prepare("UPDATE sessions SET status = 'open' WHERE id = ?").run(id);
       if (interactionId !== undefined) {
@@ -325,6 +577,17 @@ export class SessionStore implements SessionStoreContract {
       }
       return this.publicSession({ ...row, status: "open" });
     });
+  }
+
+  confirmPublicCard(actor: Actor, id: string, publishInteractionId: string, messageId: string): void {
+    this.ensureOpen();
+    validateActor(actor);
+    if (!/^\d{17,20}$/.test(messageId) || !/^\d{17,20}$/.test(publishInteractionId)) return;
+    // Only the original stored Publish receipt can identify this session's card.
+    this.db.prepare(`INSERT INTO public_cards (session_id, message_id)
+      SELECT s.id, ? FROM sessions s JOIN publish_receipts p ON p.session_id = s.id
+      WHERE s.id = ? AND s.guild_id = ? AND s.channel_id = ? AND p.interaction_id = ?
+      ON CONFLICT DO NOTHING`).run(messageId, id, actor.guildId, actor.channelId, publishInteractionId);
   }
 
   join(actor: Actor, id: string, shareName = false): PublicSession {
@@ -335,7 +598,7 @@ export class SessionStore implements SessionStoreContract {
       // A retried button press must never grant or revoke name-sharing consent.
       if (this.member(id, actor.userId)) return this.publicSession(row);
       const count = this.db.prepare("SELECT COUNT(*) AS count FROM members WHERE session_id = ?").get(id) as { count: number };
-      if (count.count >= CAPACITY) fail("SESSION_FULL", "All three seats, including the host, are taken.");
+      if (count.count >= row.capacity) fail("SESSION_FULL", `All ${row.capacity} seats, including the host, are taken.`);
       const snapshot = this.sharedName(actor.userId, shareName);
       this.db.prepare("INSERT INTO members (session_id, user_id, is_host, shared_name) VALUES (?, ?, 0, ?)")
         .run(id, actor.userId, snapshot);
@@ -367,13 +630,31 @@ export class SessionStore implements SessionStoreContract {
     });
   }
 
-  cancel(actor: Actor, id: string): PublicSession {
+  private markCancelled(id: string): void {
+    this.db.prepare("UPDATE sessions SET status = 'cancelled' WHERE id = ?").run(id);
+    this.db.prepare("UPDATE members SET shared_name = NULL WHERE session_id = ?").run(id);
+  }
+
+  cancel(actor: Actor, id: string, draftRevision?: number): PublicSession {
     return this.transaction(() => {
-      const row = this.session(actor, id, false);
+      const row = draftRevision === undefined ? this.session(actor, id, false) : this.ownedDraft(actor, id);
       if (row.host_user_id !== actor.userId) fail("FORBIDDEN", "Only the host can cancel this session.");
-      this.db.prepare("UPDATE sessions SET status = 'cancelled' WHERE id = ?").run(id);
-      this.db.prepare("UPDATE members SET shared_name = NULL WHERE session_id = ?").run(id);
+      if (draftRevision !== undefined) this.requireDraftRevision(row, draftRevision);
+      this.markCancelled(id);
       return this.publicSession({ ...row, status: "cancelled" });
+    });
+  }
+
+  discardDraft(actor: Actor, id: string, draftRevision: number): void {
+    this.transaction(() => {
+      const weekend = this.weekendDraft(actor, id);
+      const draft = weekend ?? this.ownedDraft(actor, id);
+      this.requireDraftRevision(draft, draftRevision);
+      if (weekend) {
+        this.db.prepare("DELETE FROM weekend_drafts WHERE id = ?").run(id);
+      } else {
+        this.markCancelled(id);
+      }
     });
   }
 
@@ -384,7 +665,7 @@ export class SessionStore implements SessionStoreContract {
   listSessions(actor: Actor): PublicSession[] {
     this.ensureOpen();
     validateActor(actor);
-    const rows = this.db.prepare("SELECT * FROM sessions WHERE guild_id = ? AND channel_id = ? AND status = 'open' AND end_ms > ? ORDER BY start_ms ASC, id ASC")
+    const rows = this.db.prepare(`${SESSION_WITH_CARD} WHERE guild_id = ? AND channel_id = ? AND status = 'open' AND end_ms > ? ORDER BY start_ms ASC, id ASC`)
       .all(actor.guildId, actor.channelId, this.clock()) as SessionRow[];
     return rows.map(row => this.publicSession(row));
   }

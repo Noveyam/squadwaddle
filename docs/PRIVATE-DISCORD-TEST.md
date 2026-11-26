@@ -13,7 +13,7 @@ node --version
 npm test
 ```
 
-Look for **0 failed**. Two HTTP tests start a temporary server on your Mac and send it signed test requests. They need permission to open a local port. They use generated keys and run before any Discord setup. You can repeat the fictional walkthrough with `npm run demo`.
+Look for **0 failed**. Two HTTP tests normally use a temporary loopback port on your Mac. If the workspace denies that permission, the tests report it and pass the same HTTP requests through local streams. Both paths use generated keys. You can repeat the fictional walkthrough with `npm run demo`.
 
 ## 2. Set up the private server and local settings
 
@@ -49,18 +49,19 @@ In `#session-test`, run `/session profile`. With a fresh test database, you shou
 
 ## 4. Walk through one session
 
-Use fictional names only. Keep activity, expectations and platform notes suitable for the whole channel because those fields appear on the card. Use the session ID printed on the card wherever a command asks for `session`.
+This walkthrough assumes the compact menu has been separately authorized and registered in the test guild. Use fictional names only. Keep the activity and platform text suitable for the whole channel.
 
 | Action | What the testers should see |
 | --- | --- |
-| Host runs `/session create` with an activity, future start and end including UTC offsets, and `America/Los_Angeles`. Omit `share`. | Only the host sees the draft. A second person checks the channel and `/session find` before publication. Both should be clear of the draft. |
+| Host enters a future scheduling sentence in `/session create` and reviews it. | Only the host sees the draft. **Share my Bungie ID** starts at **No**. A second person checks that the channel and `/session find` are clear of the draft. |
 | Host presses **Publish**. | One card appears with the time window, host and 1/3 seats. It displays no saved Bungie Name. |
 | Before joining, a tester presses **Show group IDs**. | The tester receives a private denial. |
-| One tester saves `ExampleRunner#5678` using `/session profile bungie_name` and presses **Join & share Bungie Name**. Another, with no saved profile, presses **Join only**. | All three seats fill. The channel card shows the Discord roster. A member pressing **Show group IDs** privately sees one fictional name and two unshared entries. The host has the same per-session choice as the others. |
-| If a fourth consenting tester is available, they press **Join only** on the full card and try **Show group IDs**. | The fourth tester is refused a seat and cannot retrieve names. With three people, record fourth-seat rejection as covered locally and pending in Discord. |
-| The sharing tester runs `/session share session:<id> enabled:false`. A member requests the IDs again. Then the tester presses **Leave** and tries **Show group IDs** again. | A fresh lookup omits the revoked name. Leaving reopens one seat and ends that tester's access. |
-| Host runs `/session cancel session:<id>`. Press **Refresh** on the channel card. | The card shows cancellation. The app rejects further joins and group-ID lookups. |
+| After that click, a tester runs `/session find` and selects **Open channel card**. | The link in the private result jumps to the host's original message. The tester is still outside the group until they choose a Join button. If the link is missing, record that observation and use the numbered **Open** button to continue. |
+| One tester saves `ExampleRunner#5678` using **My Bungie ID** in `/session help`, presses **Join**, then chooses **Join & share Bungie Name**. Another presses **Join** then **Join only**. | All three seats fill after both confirm. Use **Refresh** for the current public roster. A member pressing **Show group IDs** privately sees one fictional name and two unshared entries. |
+| If a fourth consenting tester is available, they try **Join** and **Join only**, then try **Show group IDs**. | The fourth tester is refused a seat and cannot retrieve names. With three people, record fourth-seat rejection as covered locally and pending in Discord. |
+| The sharing tester opens **Show group IDs**, presses **Stop sharing**, then presses **Leave** on the public card. | A fresh lookup omits the revoked name. Leaving reopens one seat and ends that tester's access. |
+| Host presses **Host Cancel**, then **Confirm cancellation**. Use **Refresh** on the public card. | The same card shows cancellation. The app rejects further joins and group-ID lookups. |
 
-A join made through a private search result can leave the original card showing an old count. Use **Refresh** on the channel card. If Publish appears to time out, check the channel and `/session find` before acting again. Recovery from an interrupted publication still needs work.
+A join made through the private choices can leave the original card showing an old count. Use **Refresh** on the channel card. If Publish appears to time out, check the channel and `/session find` before acting again. Recovery from an interrupted publication still needs work.
 
 At the end, remove the temporary endpoint from the test app, stop the tunnel and server with **Ctrl-C** in their windows, and remove the test card from the channel. Discord messages and screenshots have a separate lifetime from the in-memory test database. Record pass/fail observations without tokens or player names.

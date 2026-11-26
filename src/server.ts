@@ -14,6 +14,19 @@ export type ServerConfig = PilotConfig & { publicKey: string; host: string; port
 const FRESHNESS_SECONDS = 300;
 const MAX_BODY_BYTES = 64 * 1024;
 const SNOWFLAKE = /^\d{17,20}$/;
+const PAIR_FORMAT_ERROR = 'PILOT_ALLOWED_PAIRS must list comma-separated guild ID:channel ID pairs, with each channel listed once.';
+
+function validSnowflake(value: unknown): value is string {
+  return typeof value === 'string' && SNOWFLAKE.test(value);
+}
+
+function validateAllowedPairs(pairs: PilotConfig['allowedPairs']): void {
+  if (!Array.isArray(pairs) || !pairs.length ||
+      pairs.some(pair => !validSnowflake(pair?.guildId) || !validSnowflake(pair?.channelId)) ||
+      new Set(pairs.map(pair => pair.channelId)).size !== pairs.length) {
+    throw new Error(PAIR_FORMAT_ERROR);
+  }
+}
 
 export function loadServerConfig(env: Record<string, string | undefined> = process.env): ServerConfig {
   const required = (name: string, pattern: RegExp): string => {
@@ -23,8 +36,16 @@ export function loadServerConfig(env: Record<string, string | undefined> = proce
   };
   const port = Number(env.PORT ?? '3000');
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be between 1 and 65535.');
-  return { applicationId: required('DISCORD_APPLICATION_ID', SNOWFLAKE),
-    guildId: required('PILOT_GUILD_ID', SNOWFLAKE), channelId: required('PILOT_CHANNEL_ID', SNOWFLAKE),
+  const applicationId = required('DISCORD_APPLICATION_ID', SNOWFLAKE);
+  const allowedPairs = env.PILOT_ALLOWED_PAIRS === undefined
+    ? [{ guildId: required('PILOT_GUILD_ID', SNOWFLAKE), channelId: required('PILOT_CHANNEL_ID', SNOWFLAKE) }]
+    : env.PILOT_ALLOWED_PAIRS.split(',').map(entry => {
+      const [guildId, channelId, extra] = entry.trim().split(':');
+      if (extra !== undefined) throw new Error(PAIR_FORMAT_ERROR);
+      return { guildId, channelId };
+    });
+  validateAllowedPairs(allowedPairs);
+  return { applicationId, allowedPairs,
     publicKey: required('DISCORD_PUBLIC_KEY', /^[a-fA-F0-9]{64}$/), host: env.HOST || '127.0.0.1', port,
     dbPath: env.DB_PATH || './data/next-session.sqlite' };
 }
@@ -82,9 +103,8 @@ function json(res: ServerResponse, status: number, value: unknown): void {
 export function createInteractionServer(config: ServerConfig, store: SessionStoreContract,
   now: () => number = Date.now) {
   const key = verificationKey(config.publicKey); // Fail closed before opening a socket.
-  for (const value of [config.applicationId, config.guildId, config.channelId]) {
-    if (!SNOWFLAKE.test(value)) throw new Error('Application and pilot IDs must be valid Discord snowflakes.');
-  }
+  if (!validSnowflake(config.applicationId)) throw new Error('DISCORD_APPLICATION_ID is missing or invalid.');
+  validateAllowedPairs(config.allowedPairs);
   const completed = new Map<string, number>();
   const server = createServer(async (req, res) => {
     try {
@@ -114,7 +134,7 @@ export function createInteractionServer(config: ServerConfig, store: SessionStor
           content: REPLAY_NOTICE } }); return;
       }
       if (completed.size >= 10_000) throw new HttpError(503);
-      const reply = handleInteraction(payload, store, config);
+      const reply = handleInteraction(payload, store, config, time);
       const data = payload.data as Record<string, unknown> | undefined;
       const isPublish = payload.type === 3 && data?.component_type === 2 &&
         typeof data.custom_id === 'string' && data.custom_id.startsWith('ns:publish:');
@@ -150,7 +170,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
   } catch (error) {
     // Config errors contain env names only. Do not print arbitrary store errors or stack traces.
-    console.error(error instanceof Error && /^(DISCORD_|PILOT_|PORT |A valid Discord|Application and pilot)/.test(error.message)
+    console.error(error instanceof Error && /^(DISCORD_|PILOT_|PORT |A valid Discord)/.test(error.message)
       ? error.message : 'Could not start SquadWaddle. Check configuration and database permissions.');
     process.exitCode = 1;
   }

@@ -14,11 +14,13 @@ The first community is a willing, moderated adult Discord community. The first g
 
 Eventually a player can say: “Find me two people for a patient Marathon learning session Saturday, noon to 1:30 Pacific.” The app will interpret that request, ask only about essential ambiguities, show a clear preview, and wait for a deliberate Publish or Join action. For a search, it will suggest actual sessions the player can access.
 
-The starter establishes the session and privacy rules with structured slash-command inputs. Natural-language extraction is the next product layer, not a completed feature. Do not mistake a working command for proof that the low-effort experience or market demand has been validated.
+The visible menu is `/session create`, `/session find`, and `/session help`. Create accepts a local Marathon scheduling sentence such as “Four players total for Marathon on 2026-12-11 from 6:30 pm to 8:00 pm Pacific for Expedition practice.” It accepts a `YYYY-MM-DD` date or a full weekday in the selected zone. The private preview shows the activity, total seats, and localized Discord times. The host can add a platform and explicitly switch sharing from its default of No. **All weekend** creates date-only availability for Saturday and Sunday. The host picks an exact slot on one day before publishing.
+
+Before publishing, the organizer can edit an existing draft and recover the latest preview through **My drafts** in the original channel. The organizer publishes from the latest revision. After publication, the host confirms cancellation privately and the public card can reflect that status in place.
 
 ## Initial session rules
 
-- Three seats total, including the host.
+- 2–8 total seats including the host. Three is the default, and hosts can revise the size before publishing.
 - A defined start and finish, shown in the player's local Discord time plus the organizer's chosen IANA zone.
 - A patient learning expectation and a finish time that is a real boundary.
 - Platform and cross-play preferences are participant-provided information. The app does not verify console settings, activity unlocks, purchases, skill or eligibility.
@@ -37,7 +39,7 @@ Leaving ends future access; revoking sharing removes the name from future lookup
 
 ## Features deliberately deferred
 
-Natural-language and voice requests, persisted reminders, waitlists, recurring sessions, preference-based discovery, multi-server matching, social sharing, external account OAuth and a standalone social feed are later increments.
+More flexible scheduling sentences, natural-language search, live voice rooms, persisted reminders, waitlists, recurring sessions, preference-based discovery, multi-server matching, social sharing, external account OAuth and a standalone social feed are later increments. The local [voice-room lifecycle](VOICE-ROOMS.md) is exercised only with a mock adapter.
 
 Novey's proposed 1–5 score is owner-only personal memory. It is not a public reputation system. Private ratings, notes about identifiable players, and person-specific matching remain deferred while the Discord Developer Policy question is resolved. Use fictional data for any design experiment involving them. Basic coordination must work independently.
 

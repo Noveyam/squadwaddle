@@ -12,6 +12,8 @@ There is no need to build the project again from a blank prompt. This folder con
 
 The starter already has a signed interaction endpoint and command definitions. The next milestone is a complete private integration test that demonstrates the actual Discord experience.
 
+Use the [offline solo rehearsal](../README.md#offline-solo-rehearsal) to exercise the full text-to-session flow when nobody else is available. It uses fictional users and in-memory data.
+
 Follow the [private Discord test walkthrough](PRIVATE-DISCORD-TEST.md) for the Mac Terminal check, app installation, local settings and the three-player rehearsal.
 
 Work required:
@@ -20,32 +22,32 @@ Work required:
 2. Use a reachable HTTPS test endpoint. Decide deliberately whether it runs from the MacBook during testing or from a chosen host. Do not buy hosting as a prerequisite for the local demo.
 3. Register `/session` only in that test guild. Verify the endpoint, command availability and supported message/button payloads in live Discord.
 4. Test a host and two consenting testers: private draft, explicit publish, both joining choices, fourth-seat rejection, participant-only names, leave, revoke and cancel. Confirm nobody sees a game ID in a public message.
-5. Publish retries now receive a private acknowledgement across restarts when using the same SQLite file. Next, record the public message ID when delivery can be confirmed, refresh the original card after membership changes, and reconcile sessions whose public card may be missing after a crash. A retry alone cannot establish whether Discord received the original card.
+5. Publish retries receive a private acknowledgement across restarts with the same SQLite file. A button press identifying the original public Publish response now saves its message ID. Verify **Open channel card** in live Discord. Remaining work includes updating the card after a private join or slash-command cancellation, detecting deleted cards, and recovering missing cards after a crash. Until a button is pressed, an unobserved card and a missing one look the same to the app.
 6. Establish minimal participant-data retention, full deletion and moderation/reporting behavior before inviting an external community. Delete test data deliberately after the integration test.
 
 Success is a usable, correctly scoped Discord interaction. Automated local tests alone do not establish this milestone.
 
+The [private two-server beta plan](TWO-SERVER-BETA.md) records the local pair allowlist, the profile migration still required, and the launch gates.
+
 ## Milestone 2 — reduce the typing
 
-Add one natural-language input, initially text. Keep the parser separate from the session store. It proposes a structured draft; deterministic code validates it and the user confirms it.
+The compact menu and contextual controls are checked locally. `/session create` accepts the [documented sentence pattern](../README.md#create-from-a-sentence), including a weekday, a `YYYY-MM-DD` date, or a date-only weekend draft. The host edits and recovers drafts in private, picks exact times before publishing a weekend draft, and confirms cancellation on published sessions. Guild registration and live verification remain pending.
 
-The input should extract game, activity, date, start/end, time zone, requested extra players and stated expectations. Remember the user's chosen defaults where they consent. Ask a brief follow-up for genuinely missing or ambiguous details; do not repeatedly request information the app already has.
+Recognized sentences with missing AM or PM, end time, or time zone get a specific private hint. The host submits the corrected sentence to create the draft.
 
-Important examples:
+Future work includes recognizing stated expectations, supporting more time formats, and remembering defaults where users consent. Ask a brief follow-up for other genuinely missing or ambiguous details.
 
-- “Two more” means three total when the speaker is hosting.
-- “Saturday at noon” needs a reference date and the user's chosen zone. Show the exact date before publishing.
-- “Pacific” should resolve to a saved region such as America/Los_Angeles, with daylight-saving rules, rather than permanently assuming UTC−8.
-- “Noon to 1:30” is a play window, not a promise of completing an entire activity.
-- “Any groups tonight?” must query real sessions accessible in the current scope. It must never invent players, parties or join confirmations.
+When text search is added, “Any groups tonight?” must query real sessions accessible in the current scope. It must never invent players, parties or join confirmations.
 
-The model does not decide authorization, capacity, consent, compatibility or whether to post. Verify any selected model/API's current documentation, pricing and data handling before connecting it. No OpenAI API integration exists in this starter.
+The current parser runs locally. Authorization, capacity, consent and publication stay with the existing application rules. If a future increment uses an external model, verify its documentation, pricing and data handling before connecting it.
 
 ## Milestone 3 — make scheduled sessions dependable
 
 Add opt-in reminders and an end-time notice with a persistent job store, delivery records, restart recovery and cancellation handling. Define delivery channels and frequency with the user. Use bounded retries and avoid duplicate notifications.
 
-Then add a waitlist if the pilot demonstrates a need. A waitlisted person is not a confirmed group member and must not receive shared Bungie Names. Changing capacity or promoting someone needs a deterministic, tested transition.
+The [voice-room prototype](VOICE-ROOMS.md) uses the published session capacity and tests local SQLite recovery with a mock adapter. Review its remaining gates before wiring it into Discord.
+
+Then add a waitlist if the pilot demonstrates a need. A waitlisted person is not a confirmed group member and must not receive shared Bungie Names. Changing capacity after publication or promoting someone needs a deterministic, tested transition.
 
 ## Milestone 4 — learn from a small community
 
@@ -64,4 +66,4 @@ A standalone social network, multi-game expansion, public player ratings, privat
 - Discord signed requests authenticate the transport; the domain layer receives a trusted Actor. Never expose domain methods directly as a browser API that accepts arbitrary acting user IDs.
 - A saved Bungie Name is self-reported. Account verification and in-game invites require separate supported integrations; do not imply those features exist.
 - The current list shows the first five open sessions and has no pagination. Improve discovery when the pilot exceeds that scale.
-- Session editing and host transfer are not implemented. A host can cancel and create another session.
+- Hosts can edit an unpublished draft or recover its private preview from the original channel using [**My drafts**](../README.md#recover-a-private-draft). Changes after publishing and host transfers remain future work. A host can cancel a published session and create another.
