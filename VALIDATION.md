@@ -1,5 +1,19 @@
 # Verification record
 
+## Private Discord smoke test · November 25, 2026
+
+In a private test channel, Discord accepted the temporary signed interaction endpoint and guild-only command. An unsigned request was rejected. A real `/session create` returned a private draft for the requested time, with three seats and ID sharing off. Discard confirmed that no card was published. The endpoint and tunnel were then closed and the prior guild registration restored. This did not test live voice, publishing, or the two-hour default.
+
+## Combined local checkpoint · November 25, 2026
+
+The two-hour draft default and the default-off voice adapter were tested together: 82 automated tests, the signed rehearsal, and the demo passed. No voice rooms were created in Discord.
+
+## Discord voice adapter offline · November 25, 2026
+
+Fictional Gateway and REST inputs exercised default-off category scoping, room capacity and roster permission payloads, and a durable creation attempt that prevents a second POST after a lost acknowledgement. Cleanup refused rooms without a Discord creation receipt, rooms moved out of the category, and rooms whose occupancy changed during the final check. Disconnect, a sequence gap, and resume without a fresh guild snapshot left occupancy unknown.
+
+On Node 24.22.3 with networking denied, all 81 tests passed. The demo and signed solo rehearsal also passed. The adapter remains disconnected from the live server. [Voice pilot gates](docs/VOICE-ROOMS.md)
+
 ## Variable capacity and mocked voice recovery · November 25, 2026
 
 Signed fictional interactions verified the three-seat default, “two more” as three total, four and six total seats, and private clarification for ambiguous, conflicting, fractional, or out-of-range counts. A host changed four seats to six in the private draft and kept the existing sharing choice. The prior Publish button was stale. Discovery and the public card displayed the approved size, and competing joins for the last seat kept the six-player roster at six. Four-player joins and eight maximum-length shared names were also checked.

@@ -102,7 +102,7 @@ In the original channel, open **My drafts** from `/session help` or a draft prev
 
 ### Voice-room prototype
 
-The [offline voice lifecycle](docs/VOICE-ROOMS.md) passes the published session’s seat limit to a mock adapter. The Discord command menu and cards currently have no voice control.
+The [offline voice lifecycle](docs/VOICE-ROOMS.md) passes the published session’s seat limit to the adapter. Fictional Gateway events and REST responses exercise the Discord payloads, ownership checks, and cleanup guards. Voice is disabled and the Discord command menu and cards have no voice control.
 
 ## Development server configuration
 

@@ -16,7 +16,7 @@ type RoomAddress = { guildId: string; roomId: string };
  * deleteIfEmpty must recheck the same continuous empty observation immediately before deletion.
  */
 export interface VoiceGateway {
-  /** Retrying a provisionId returns the same created room, even after a lost acknowledgement. */
+  /** Retry returns the same acknowledged room or refuses to proceed if creation is uncertain. */
   createPrivateRoom(request: { provisionId: string; guildId: string; categoryId: string; capacity: number;
     allowedUserIds: readonly string[] }): Promise<string>;
   presence(address: RoomAddress): VoicePresence;

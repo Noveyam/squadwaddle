@@ -1,5 +1,11 @@
 # First private Discord test
 
+## Solo smoke test
+
+Use a private test channel, a confirmed temporary endpoint, and disposable storage. In Discord, run `/session create` with a future scheduling sentence. Confirm that the draft is visible only to you, the requested times and seat count match, and game ID sharing is off. Choose **Discard** and look for **Draft discarded. No session card was published.** Clear the temporary endpoint and stop only the tunnel and server started for the test.
+
+## Group rehearsal
+
 **Goal:** You host one three-seat Marathon session on your MacBook. A second person can join with a fictional Bungie Name, and a third can play without entering one. Everyone can see the session card in the test channel. Only confirmed players can request the names shared for that session.
 
 ## 1. Finish the local check
@@ -11,6 +17,8 @@ cd "$HOME/Code/Projects/Discord Group Bot/next-session"
 export PATH="/Applications/ChatGPT.app/Contents/Resources/cua_node/bin:$PATH"
 node --version
 npm test
+npm run demo
+npm run rehearsal
 ```
 
 Look for **0 failed**. Two HTTP tests normally use a temporary loopback port on your Mac. If the workspace denies that permission, the tests report it and pass the same HTTP requests through local streams. Both paths use generated keys. You can repeat the fictional walkthrough with `npm run demo`.
@@ -45,7 +53,7 @@ export PATH="/Applications/ChatGPT.app/Contents/Resources/cua_node/bin:$PATH"
 REGISTER_COMMANDS=yes npm run register
 ```
 
-In `#session-test`, run `/session profile`. With a fresh test database, you should see a private reply saying you have no saved name. Have a tester confirm that your reply is invisible to them. This is the first live success to look for.
+In `#session-test`, run `/session create` with a future scheduling sentence. Have a tester confirm that the private draft is invisible to them. This is the first live success to look for.
 
 ## 4. Walk through one session
 
