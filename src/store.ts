@@ -181,23 +181,20 @@ function validateWeekend(availability: WeekendAvailability, now: number): string
 /**
  * Synchronous, persistent session rules. The transport supplies Actor from a
  * verified interaction, never from command text or a caller-chosen user ID.
- * Profiles are per user; memberships and name snapshots are per session.
+ * Memberships and name snapshots are per session.
  */
 export class SessionStore implements SessionStoreContract {
   private readonly db: DatabaseSync;
   private readonly now: () => Date;
+  private readonly guildScopedProfiles: boolean;
   private closed = false;
 
-  constructor(filename = ":memory:", now: () => Date = () => new Date()) {
+  constructor(filename = ":memory:", now: () => Date = () => new Date(), options: { guildScopedProfiles?: boolean } = {}) {
     this.now = now;
     this.db = new DatabaseSync(filename);
     this.db.exec(`
       PRAGMA foreign_keys = ON;
       PRAGMA busy_timeout = 5000;
-      CREATE TABLE IF NOT EXISTS profiles (
-        user_id TEXT PRIMARY KEY,
-        bungie_name TEXT NOT NULL
-      );
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         guild_id TEXT NOT NULL,
@@ -252,7 +249,7 @@ export class SessionStore implements SessionStoreContract {
       );
       CREATE INDEX IF NOT EXISTS weekend_draft_scope ON weekend_drafts (guild_id, channel_id, host_user_id);
     `);
-    this.transaction(() => {
+    this.guildScopedProfiles = this.transaction(() => {
       const columns = this.db.prepare("PRAGMA table_info(sessions)").all();
       if (!columns.some(column => column.name === "draft_revision")) {
         this.db.exec("ALTER TABLE sessions ADD COLUMN draft_revision INTEGER NOT NULL DEFAULT 0");
@@ -263,6 +260,27 @@ export class SessionStore implements SessionStoreContract {
       if (!this.db.prepare("PRAGMA table_info(weekend_drafts)").all().some(column => column.name === "capacity")) {
         this.db.exec(`ALTER TABLE weekend_drafts ADD COLUMN ${CAPACITY_COLUMN}`);
       }
+      if (this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'guild_profiles'").get()) return true;
+      if (options.guildScopedProfiles !== true) {
+        this.db.exec("CREATE TABLE IF NOT EXISTS profiles (user_id TEXT PRIMARY KEY, bungie_name TEXT NOT NULL)");
+        return false;
+      }
+      // The legacy names have no guild provenance. Retire them and invalidate drafts whose displayed consent changed.
+      this.db.exec(`
+        CREATE TABLE guild_profiles (
+          guild_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          bungie_name TEXT NOT NULL,
+          PRIMARY KEY (guild_id, user_id)
+        );
+        UPDATE sessions SET draft_revision = draft_revision + 1 WHERE status = 'draft' AND id IN (
+          SELECT session_id FROM members WHERE is_host = 1 AND shared_name IS NOT NULL
+        );
+        UPDATE members SET shared_name = NULL WHERE shared_name IS NOT NULL;
+        UPDATE weekend_drafts SET shared_name = NULL, draft_revision = draft_revision + 1 WHERE shared_name IS NOT NULL;
+        DROP TABLE IF EXISTS profiles;
+      `);
+      return true;
     });
   }
 
@@ -365,11 +383,11 @@ export class SessionStore implements SessionStoreContract {
     };
   }
 
-  private sharedName(userId: string, shareName: boolean): string | null {
+  private sharedName(actor: Actor, shareName: boolean): string | null {
     if (!shareName) return null;
-    const profile = this.db.prepare("SELECT bungie_name FROM profiles WHERE user_id = ?").get(userId) as { bungie_name: string } | undefined;
-    if (!profile) fail("PROFILE_REQUIRED", "Save your Bungie Name before choosing to share it with this session.");
-    return profile.bungie_name;
+    const { bungieName } = this.getProfile(actor);
+    if (bungieName === null) fail("PROFILE_REQUIRED", "Save your Bungie Name before choosing to share it with this session.");
+    return bungieName;
   }
 
   /** An explicit projection prevents private profile or snapshot fields leaking. */
@@ -399,8 +417,13 @@ export class SessionStore implements SessionStoreContract {
     validateActor(actor);
     const name = validateBungieName(bungieName);
     this.transaction(() => {
-      this.db.prepare("INSERT INTO profiles (user_id, bungie_name) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET bungie_name = excluded.bungie_name")
-        .run(actor.userId, name);
+      if (this.guildScopedProfiles) {
+        this.db.prepare(`INSERT INTO guild_profiles (guild_id, user_id, bungie_name) VALUES (?, ?, ?)
+          ON CONFLICT(guild_id, user_id) DO UPDATE SET bungie_name = excluded.bungie_name`).run(actor.guildId, actor.userId, name);
+      } else {
+        this.db.prepare(`INSERT INTO profiles (user_id, bungie_name) VALUES (?, ?)
+          ON CONFLICT(user_id) DO UPDATE SET bungie_name = excluded.bungie_name`).run(actor.userId, name);
+      }
       // Deliberately do not update existing per-session consent snapshots.
     });
   }
@@ -408,13 +431,26 @@ export class SessionStore implements SessionStoreContract {
   getProfile(actor: Actor): { bungieName: string | null } {
     this.ensureOpen();
     validateActor(actor);
-    const row = this.db.prepare("SELECT bungie_name FROM profiles WHERE user_id = ?").get(actor.userId) as { bungie_name: string } | undefined;
+    const row = (this.guildScopedProfiles
+      ? this.db.prepare("SELECT bungie_name FROM guild_profiles WHERE guild_id = ? AND user_id = ?").get(actor.guildId, actor.userId)
+      : this.db.prepare("SELECT bungie_name FROM profiles WHERE user_id = ?").get(actor.userId)) as { bungie_name: string } | undefined;
     return { bungieName: row?.bungie_name ?? null };
   }
 
   clearProfile(actor: Actor): void {
     validateActor(actor);
     this.transaction(() => {
+      if (this.guildScopedProfiles) {
+        this.db.prepare("DELETE FROM guild_profiles WHERE guild_id = ? AND user_id = ?").run(actor.guildId, actor.userId);
+        this.db.prepare(`UPDATE sessions SET draft_revision = draft_revision + 1 WHERE guild_id = ? AND status = 'draft' AND id IN (
+          SELECT session_id FROM members WHERE user_id = ? AND is_host = 1 AND shared_name IS NOT NULL
+        )`).run(actor.guildId, actor.userId);
+        this.db.prepare(`UPDATE members SET shared_name = NULL WHERE user_id = ? AND shared_name IS NOT NULL
+          AND session_id IN (SELECT id FROM sessions WHERE guild_id = ?)`).run(actor.userId, actor.guildId);
+        this.db.prepare(`UPDATE weekend_drafts SET shared_name = NULL, draft_revision = draft_revision + 1
+          WHERE guild_id = ? AND host_user_id = ? AND shared_name IS NOT NULL`).run(actor.guildId, actor.userId);
+        return;
+      }
       this.db.prepare("DELETE FROM profiles WHERE user_id = ?").run(actor.userId);
       this.db.prepare("UPDATE members SET shared_name = NULL WHERE user_id = ?").run(actor.userId);
       this.db.prepare("UPDATE weekend_drafts SET shared_name = NULL WHERE host_user_id = ?").run(actor.userId);
@@ -445,7 +481,7 @@ export class SessionStore implements SessionStoreContract {
     return this.transaction(() => {
       if (schedule.start.milliseconds <= this.clock()) fail("VALIDATION_ERROR", "Choose a start time in the future.");
       return this.insertTimedDraft(actor, randomUUID(), schedule, expectations, platformNotes,
-        this.sharedName(actor.userId, shareName), 0, capacity);
+        this.sharedName(actor, shareName), 0, capacity);
     });
   }
 
@@ -466,7 +502,7 @@ export class SessionStore implements SessionStoreContract {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, actor.guildId, actor.channelId, actor.userId, activity, zone, expectations, platform,
           availability.saturday, availability.sunday, availability.preferredStartMinute ?? null,
-          availability.preferredEndMinute ?? null, this.sharedName(actor.userId, shareName), capacity);
+          availability.preferredEndMinute ?? null, this.sharedName(actor, shareName), capacity);
       return this.weekendPreview(this.weekendDraft(actor, id)!);
     });
   }
@@ -502,7 +538,7 @@ export class SessionStore implements SessionStoreContract {
     let snapshot = row.shared_name;
     if (changes.shareName !== undefined) {
       validateSharing(changes.shareName);
-      snapshot = this.sharedName(actor.userId, changes.shareName);
+      snapshot = this.sharedName(actor, changes.shareName);
     }
     const timeZone = changes.timeZone === undefined ? row.time_zone : validateTimeZone(changes.timeZone);
     if (timeZone !== row.time_zone) fail("WEEKEND_SLOT", "Use the weekend's selected time zone.");
@@ -538,7 +574,7 @@ export class SessionStore implements SessionStoreContract {
       const capacity = changes.capacity === undefined ? row.capacity : validateCapacity(changes.capacity);
       if (changes.shareName !== undefined) {
         validateSharing(changes.shareName);
-        const snapshot = this.sharedName(actor.userId, changes.shareName);
+        const snapshot = this.sharedName(actor, changes.shareName);
         this.db.prepare("UPDATE members SET shared_name = ? WHERE session_id = ? AND user_id = ?")
           .run(snapshot, id, actor.userId);
       }
@@ -599,7 +635,7 @@ export class SessionStore implements SessionStoreContract {
       if (this.member(id, actor.userId)) return this.publicSession(row);
       const count = this.db.prepare("SELECT COUNT(*) AS count FROM members WHERE session_id = ?").get(id) as { count: number };
       if (count.count >= row.capacity) fail("SESSION_FULL", `All ${row.capacity} seats, including the host, are taken.`);
-      const snapshot = this.sharedName(actor.userId, shareName);
+      const snapshot = this.sharedName(actor, shareName);
       this.db.prepare("INSERT INTO members (session_id, user_id, is_host, shared_name) VALUES (?, ?, 0, ?)")
         .run(id, actor.userId, snapshot);
       return this.publicSession(row);
@@ -623,7 +659,7 @@ export class SessionStore implements SessionStoreContract {
       this.requireMember(id, actor.userId);
       // Revocation remains possible after an end or cancellation.
       if (shareName) this.requireOpenSession(row);
-      const snapshot = this.sharedName(actor.userId, shareName);
+      const snapshot = this.sharedName(actor, shareName);
       this.db.prepare("UPDATE members SET shared_name = ? WHERE session_id = ? AND user_id = ?")
         .run(snapshot, id, actor.userId);
       return this.publicSession(row);

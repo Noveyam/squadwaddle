@@ -15,6 +15,9 @@ import { handleInteraction, publicCard, safeText, EPHEMERAL, SESSION_COMMAND, ty
 import { createInteractionServer, loadServerConfig } from '../src/server.ts';
 import { registerCommands } from '../scripts/register-commands.ts';
 import { SessionStore } from '../src/store.ts';
+import type { DiscordVoiceRest } from '../src/discord-voice-gateway.ts';
+import { VoiceRoomRegistry } from '../src/voice-room-registry.ts';
+import { VOICE_EMPTY_GRACE_MS } from '../src/voice-rooms.ts';
 
 const APP = '100000000000000001';
 const GUILD = '100000000000000002';
@@ -168,6 +171,314 @@ test('creation is private, preserves explicit time input, and publishes only aft
   assert.equal(messageData(repeat).flags! & EPHEMERAL, EPHEMERAL);
   assert.match(messageData(repeat).content, /already published/);
   assert.equal(store.calls.filter(c => c.method === 'publish').length, 1);
+});
+
+test('draft-only mode disables previews and rejects signed cached Publish without storage or outbound calls', async t => {
+  const now = Date.parse('2026-11-25T12:00:00Z');
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const config = { ...PILOT, publicKey: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex'),
+    host: '127.0.0.1', port: 3148, dbPath: ':memory:' };
+  const store = new SessionStore(':memory:', () => new Date(now));
+  t.after(() => store.close());
+  const publish = t.mock.method(store, 'publish');
+  const outbound = t.mock.method(globalThis, 'fetch', () => { throw new Error('Unexpected external request.'); });
+  const enabled = createInteractionServer(config, store, () => now);
+  const disabled = createInteractionServer({ ...config, publishingEnabled: false }, store, () => now);
+  let interactionId = 100000000000000300n;
+  const send = (server: Server, payload: object) =>
+    signedMessage(server, privateKey, now, { ...payload, id: String(interactionId++) });
+  const create = command('create', { request: EXPEDITION_REQUEST });
+  const cached = buttonNamed(await send(enabled, create), 'Publish');
+  assert.equal(cached.disabled, false);
+  const draft = await send(disabled, create);
+  const disabledPublish = buttonNamed(draft, 'Publish');
+  assert.equal(disabledPublish.disabled, true);
+  assert.match(draft.content, /Publishing is disabled for this test/);
+
+  const oldClick = { ...buttonPress(cached.custom_id, HOST, EPHEMERAL), id: String(interactionId++) };
+  for (const click of [oldClick, oldClick,
+    { ...buttonPress(disabledPublish.custom_id, HOST, EPHEMERAL), id: String(interactionId++) }]) {
+    const reply = await signedMessage(disabled, privateKey, now, click);
+    assert.equal(reply.flags! & EPHEMERAL, EPHEMERAL);
+    assert.match(reply.content, /Publishing is disabled for this test/);
+  }
+  const reopen = buttonPress(`ns:open-draft:${cached.custom_id.split(':')[2]}`, HOST, EPHEMERAL);
+  assert.equal(buttonNamed(await send(disabled, reopen), 'Publish').disabled, true);
+  const edit = await signedResponse(disabled, privateKey, now, {
+    ...buttonPress(buttonNamed(draft, 'Edit').custom_id, HOST, EPHEMERAL), id: String(interactionId++),
+  });
+  assert.equal(edit.type, 9);
+  const revised = await send(disabled, submitForm(edit.data.custom_id, { activity: 'Expedition warm-up' }));
+  assert.equal(buttonNamed(revised, 'Publish').disabled, true);
+  const discard = await send(disabled, buttonPress(buttonNamed(revised, 'Discard').custom_id, HOST, EPHEMERAL));
+  assert.match(discard.content, /Draft discarded/);
+  assert.match((await send(disabled, command('find'))).content, /No open sessions/);
+  assert.equal(publish.mock.callCount(), 0);
+  assert.equal(outbound.mock.callCount(), 0);
+
+  const normal = await send(enabled, buttonPress(cached.custom_id, HOST, EPHEMERAL));
+  assert.equal(normal.flags! & EPHEMERAL, 0);
+  assert.equal(publish.mock.callCount(), 1);
+  assert.equal(outbound.mock.callCount(), 0);
+});
+
+test('signed voice pilot is explicitly scoped and requires trusted presence through cleanup and restart', async t => {
+  let now = Date.parse('2026-11-25T12:00:00Z');
+  const clock = () => now;
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const config = { ...PILOT, publicKey: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex'),
+    host: '127.0.0.1', port: 3148, dbPath: ':memory:',
+    allowedPairs: [...PILOT.allowedPairs, { guildId: GUILD, channelId: OTHER_CHANNEL }] };
+  const categoryId = '100000000000000301';
+  const elsewhere = '100000000000000302';
+  const outsider = '100000000000000303';
+  const parent = { id: categoryId, guild_id: GUILD, type: 4 };
+  type Room = { id: string; guild_id: string; type: number; parent_id: string };
+  const unrelated: Room = { id: '100000000000000304', guild_id: GUILD, type: 2, parent_id: categoryId };
+  const channels = new Map<string, Room>([[unrelated.id, unrelated]]);
+  const sent: Parameters<DiscordVoiceRest>[] = [];
+  let nextRoom = 100000000000000305n;
+  const rest: DiscordVoiceRest = async (...args) => {
+    sent.push(args);
+    const [method, path, body] = args;
+    if (method === 'POST' && path === `/guilds/${GUILD}/channels`) {
+      assert.equal(body?.parent_id, categoryId);
+      const room = { ...unrelated, id: String(nextRoom++) };
+      channels.set(room.id, room);
+      return room;
+    }
+    const id = /^\/channels\/(\d+)$/.exec(path)?.[1];
+    assert.ok(id, 'Expected one scoped Discord channel route.');
+    if (method === 'GET' && id === categoryId) return parent;
+    const room = channels.get(id);
+    assert.ok(room, 'Unexpected fictional voice room.');
+    if (method === 'DELETE') channels.delete(id);
+    return room;
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'squadwaddle-signed-voice-'));
+  const file = join(dir, 'voice.sqlite');
+  let registry = new VoiceRoomRegistry(file);
+  let store = new SessionStore(join(dir, 'sessions.sqlite'), () => new Date(now));
+  t.after(() => { registry.close(); store.close(); rmSync(dir, { recursive: true, force: true }); });
+  let interactionId = 100000000000000500n;
+  const send = (server: Server, payload: object) => signedMessage(server, privateKey, now, { ...payload, id: String(interactionId++) });
+  const create = (server: Server, request = EXPEDITION_REQUEST, channelId = CHANNEL) =>
+    send(server, { ...command('create', { request }), channel_id: channelId });
+  const press = (server: Server, card: MessageData, label: string, user = HOST, channelId = CHANNEL) =>
+    send(server, { ...buttonPress(buttonNamed(card, label).custom_id, user, card.flags), channel_id: channelId });
+  const assertPrivate = (reply: MessageData, pattern: RegExp) => {
+    assert.equal(reply.flags! & EPHEMERAL, EPHEMERAL);
+    assert.match(reply.content, pattern);
+  };
+
+  const disabled = createInteractionServer(config, store, clock, { registry, rest });
+  assert.equal(disabled.voicePilot, undefined);
+  const ordinary = await press(disabled, await create(disabled), 'Publish');
+  assert.doesNotMatch(JSON.stringify(ordinary.components), /Join voice/);
+  const ordinaryId = buttonNamed(ordinary, 'Join').custom_id.split(':')[2];
+  assertPrivate(await send(disabled, buttonPress(`ns:voice-room:${ordinaryId}`)), /disabled in this channel/);
+  assert.deepEqual(registry.createdRooms(), []);
+  assert.deepEqual(sent, []);
+
+  const voiceConfig = { ...config, voiceScopes: [{ guildId: GUILD, channelId: CHANNEL, categoryId }] };
+  const draftOnly = createInteractionServer({ ...voiceConfig, publishingEnabled: false }, store, clock, { registry, rest });
+  assert.equal(draftOnly.voicePilot, undefined);
+  assertPrivate(await send(draftOnly, buttonPress(`ns:voice-room:${ordinaryId}`)), /disabled in this channel/);
+  assert.deepEqual(sent, []);
+  assert.throws(() => createInteractionServer(voiceConfig, store, clock), /require.*injected/);
+  assert.throws(() => createInteractionServer({
+    ...config, voiceScopes: [{ guildId: OTHER_GUILD, channelId: OTHER_CHANNEL, categoryId }],
+  }, store, clock, { registry, rest }), /one allowed text channel/);
+  const start = () => createInteractionServer(voiceConfig, store, clock, { registry, rest });
+  let server = start();
+  const card3 = await press(server, await create(server), 'Publish');
+  const card6 = await press(server, await create(server, EXPEDITION_REQUEST.replace('Two more', '6 seats total')), 'Publish');
+  const outOfScope = await press(server, await create(server, EXPEDITION_REQUEST, OTHER_CHANNEL), 'Publish', HOST, OTHER_CHANNEL);
+  assert.doesNotMatch(JSON.stringify(outOfScope.components), /Join voice/);
+  for (const card of [card3, card6]) {
+    const join = await press(server, card, 'Join', GUEST);
+    await press(server, join, 'Join only', GUEST);
+  }
+
+  assertPrivate(await press(server, card3, 'Join voice'), /presence is unavailable/);
+  assert.deepEqual(sent, []);
+  const startGateway = () => {
+    const gateway = server.voicePilot!.gateway;
+    const connection = gateway.connect();
+    let sequence = 0;
+    const dispatch = (t: string, d: unknown) => gateway.dispatch(connection, { t, s: ++sequence, d });
+    return {
+      dispatch, disconnect: () => gateway.disconnect(connection),
+      snapshot: () => dispatch('GUILD_CREATE', { id: GUILD, channels: [parent, ...channels.values()], voice_states: [] }),
+    };
+  };
+  const first = startGateway();
+  first.snapshot();
+  assertPrivate(await press(server, card3, 'Join voice', outsider), /Only confirmed players/);
+  assertPrivate(await press(server, card3, 'Join voice', HOST, OTHER_CHANNEL), /disabled in this channel/);
+  assert.deepEqual(sent, []);
+
+  assertPrivate(await press(server, card3, 'Join voice'), /awaiting confirmation/);
+  const [room3] = registry.createdRooms();
+  first.dispatch('CHANNEL_CREATE', channels.get(room3.roomId));
+  assertPrivate(await press(server, card3, 'Join voice', GUEST), new RegExp(room3.roomId));
+  const both = await Promise.all([press(server, card6, 'Join voice'), press(server, card6, 'Join voice', GUEST)]);
+  for (const reply of both) assertPrivate(reply, /awaiting confirmation/);
+  const room6 = registry.createdRooms().find(room => room.capacity === 6)!;
+  first.dispatch('CHANNEL_CREATE', channels.get(room6.roomId));
+  assertPrivate(await press(server, card6, 'Join voice'), new RegExp(room6.roomId));
+  const creates = sent.filter(([method]) => method === 'POST');
+  assert.deepEqual(creates.map(([, , body]) => body?.user_limit), [3, 6]);
+  for (const [, path, body] of creates) {
+    assert.equal(path, `/guilds/${GUILD}/channels`);
+    assert.deepEqual(body?.permission_overwrites, [
+      { id: GUILD, type: 0, deny: '1049600', allow: '0' },
+      { id: HOST, type: 1, deny: '0', allow: '1049600' },
+      { id: GUEST, type: 1, deny: '0', allow: '1049600' },
+    ]);
+  }
+
+  const trackedElsewhere = registry.reserve({ sessionId: 'fictional-other-channel-session', guildId: GUILD,
+    channelId: OTHER_CHANNEL, categoryId, capacity: 3 });
+  const roomElsewhere = { ...unrelated, id: String(nextRoom++) };
+  assert.equal(registry.claimDiscordCreation(trackedElsewhere.provisionId, GUILD, categoryId, 3), true);
+  registry.confirmDiscordCreation(trackedElsewhere.provisionId, roomElsewhere.id);
+  registry.confirm(trackedElsewhere, roomElsewhere.id);
+  channels.set(roomElsewhere.id, roomElsewhere);
+  first.dispatch('CHANNEL_CREATE', roomElsewhere);
+  const reap = () => server.voicePilot!.reapEmptyRooms();
+  const deletes = () => sent.filter(([method]) => method === 'DELETE').map(([, path]) => path);
+  await reap();
+  first.disconnect();
+  now += VOICE_EMPTY_GRACE_MS;
+  await reap();
+  assert.deepEqual(deletes(), []);
+  assertPrivate(await press(server, card3, 'Join voice'), /presence is unavailable/);
+
+  registry.close();
+  store.close();
+  registry = new VoiceRoomRegistry(file);
+  store = new SessionStore(join(dir, 'sessions.sqlite'), () => new Date(now));
+  server = start();
+  const fresh = startGateway();
+  fresh.dispatch('RESUMED', {});
+  await reap();
+  assertPrivate(await press(server, card3, 'Join voice'), /presence is unavailable/);
+  fresh.snapshot();
+  assertPrivate(await press(server, card3, 'Join voice'), new RegExp(room3.roomId));
+  assert.equal(sent.filter(([method]) => method === 'POST').length, 2);
+  fresh.dispatch('VOICE_STATE_UPDATE', { guild_id: GUILD, user_id: GUEST, channel_id: room3.roomId });
+  const moved = { ...channels.get(room6.roomId)!, parent_id: elsewhere };
+  channels.set(room6.roomId, moved);
+  fresh.dispatch('CHANNEL_UPDATE', moved);
+  now += VOICE_EMPTY_GRACE_MS;
+  await reap();
+  assert.deepEqual(deletes(), []);
+  fresh.dispatch('VOICE_STATE_UPDATE', { guild_id: GUILD, user_id: GUEST, channel_id: null });
+  await reap();
+  now += VOICE_EMPTY_GRACE_MS - 1;
+  await reap();
+  assert.deepEqual(deletes(), []);
+  now++;
+  await reap();
+  assert.deepEqual(deletes(), [`/channels/${room3.roomId}`]);
+  assert.deepEqual([...channels.keys()].sort(), [unrelated.id, room6.roomId, roomElsewhere.id].sort());
+});
+
+test('fictional guild profile cutover erases legacy consent and isolates signed saves, shares and clears', async t => {
+  const now = Date.parse('2026-11-25T12:00:00Z');
+  const clock = () => new Date(now);
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const alpha = { guildId: GUILD, channelId: CHANNEL };
+  const beta = { guildId: OTHER_GUILD, channelId: OTHER_CHANNEL };
+  const alphaSecond = { guildId: GUILD, channelId: '100000000000000401' };
+  const config = { ...PILOT, allowedPairs: [alpha, beta, alphaSecond],
+    publicKey: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex'),
+    host: '127.0.0.1', port: 3148, dbPath: ':memory:' };
+  const dir = mkdtempSync(join(tmpdir(), 'squadwaddle-profile-cutover-'));
+  const path = join(dir, 'fictional.sqlite');
+  let store = new SessionStore(path, clock);
+  t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+  const hostA = { ...alpha, userId: HOST };
+  const hostB = { ...beta, userId: HOST };
+  const hostSecond = { ...alphaSecond, userId: HOST };
+  store.saveProfile(hostA, 'FictionalLegacyHost#1111');
+  store.saveProfile({ ...alpha, userId: GUEST }, 'FictionalLegacyGuest#2222');
+  const open = (actor: Actor) => {
+    const session = store.publish(actor, store.createDraft(actor, INPUT, true).id);
+    store.join({ ...actor, userId: GUEST }, session.id, true);
+    return session;
+  };
+  const [a, b, aSecond] = [hostA, hostB, hostSecond].map(open);
+  const timed = store.createDraft(hostA, INPUT, true);
+  const weekend = store.createWeekendDraft(hostB, { activity: INPUT.activity, expectations: INPUT.expectations,
+    platformNotes: '', availability: { saturday: '2026-11-28', sunday: '2026-11-29', timeZone: 'UTC' } }, true);
+  store.close();
+  store = new SessionStore(path, clock, { guildScopedProfiles: true });
+  const inspect = new DatabaseSync(path);
+  try {
+    const count = (sql: string) => inspect.prepare(sql).get()?.count;
+    assert.equal(count("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'profiles'"), 0);
+    assert.equal(count('SELECT count(*) AS count FROM guild_profiles'), 0);
+    assert.equal(count('SELECT count(*) AS count FROM members WHERE shared_name IS NOT NULL'), 0);
+    assert.equal(count('SELECT count(*) AS count FROM weekend_drafts WHERE shared_name IS NOT NULL'), 0);
+  } finally { inspect.close(); }
+
+  let server = createInteractionServer(config, store, () => now);
+  let next = 100000000000000600n;
+  const send = (scope: typeof alpha, payload: object) => signedResponse(server, privateKey, now,
+    { ...payload, guild_id: scope.guildId, channel_id: scope.channelId, id: String(next++) });
+  const press = async (scope: typeof alpha, action: string, id: string) => {
+    const data = messageData(await send(scope, buttonPress(`ns:${action}:${id}`, HOST, EPHEMERAL)));
+    assert.equal(data.flags! & EPHEMERAL, EPHEMERAL);
+    assert.doesNotMatch(data.content, /FictionalLegacy/);
+    return data;
+  };
+  const profile = (scope: typeof alpha) => press(scope, 'profile', 'me');
+  const names = (scope: typeof alpha, id: string) => press(scope, 'ids', id);
+  const save = async (scope: typeof alpha, value: string) => {
+    const edit = await send(scope, buttonPress('ns:profile-edit:me', HOST, EPHEMERAL));
+    assert.equal(edit.type, 9);
+    const saved = messageData(await send(scope, submitForm(edit.data.custom_id, { bungie_name: value })));
+    assert.match(saved.content, /saved privately/);
+  };
+
+  for (const scope of [alpha, beta, alphaSecond]) assert.match((await profile(scope)).content, /No Bungie Name saved/);
+  for (const session of [a, b, aSecond]) {
+    const reply = await names(session, session.id);
+    assert.equal(reply.content.split('ID not shared').length - 1, 2);
+  }
+  assert.match((await press(alpha, 'open-draft', timed.id)).content, /keep private/);
+  assert.match((await press(beta, 'open-draft', weekend.session.id)).content, /keep private/);
+  assert.match((await press(alpha, 'publish', `${timed.id}:0`)).content, /out of date/);
+  assert.match((await press(beta, 'draft-share-on', `${weekend.session.id}:0`)).content, /out of date/);
+  assert.equal(store.getDraft(hostA, timed.id).revision, 1);
+  assert.equal(store.getDraft(hostB, weekend.session.id).revision, 1);
+
+  await save(alpha, 'FictionalAlpha#3333');
+  assert.match((await profile(alphaSecond)).content, /FictionalAlpha/);
+  assert.match((await profile(beta)).content, /No Bungie Name saved/);
+  assert.match((await press(beta, 'share-on', b.id)).content, /Save your Bungie Name/);
+  assert.match((await names(alpha, a.id)).content, /ID not shared/);
+  assert.doesNotMatch((await names(alpha, a.id)).content, /FictionalAlpha/);
+  await save(beta, 'FictionalBeta#4444');
+  assert.match((await profile(beta)).content, /FictionalBeta/);
+  for (const session of [a, b, aSecond]) await press(session, 'share-on', session.id);
+  assert.match((await names(alpha, a.id)).content, /FictionalAlpha/);
+  assert.doesNotMatch((await names(alpha, a.id)).content, /FictionalBeta/);
+  assert.match((await names(beta, b.id)).content, /FictionalBeta/);
+  assert.doesNotMatch((await names(beta, b.id)).content, /FictionalAlpha/);
+  assert.match((await names(beta, a.id)).content, /unavailable/);
+
+  await press(alpha, 'profile-clear', 'me');
+  assert.doesNotMatch((await names(alpha, a.id)).content, /FictionalAlpha/);
+  assert.doesNotMatch((await names(alphaSecond, aSecond.id)).content, /FictionalAlpha/);
+  store.close();
+  store = new SessionStore(path, clock);
+  server = createInteractionServer(config, store, () => now);
+  assert.match((await profile(alpha)).content, /No Bungie Name saved/);
+  assert.match((await profile(beta)).content, /FictionalBeta/);
+  assert.match((await names(beta, b.id)).content, /FictionalBeta/);
 });
 
 test('text drafts resolve weekdays and calendar dates in the chosen zone before saving', () => {
@@ -818,6 +1129,9 @@ test('configuration fails closed and defaults to loopback', () => {
   assert.throws(() => loadServerConfig({}), /missing or invalid/);
   const env = { DISCORD_APPLICATION_ID: APP, PILOT_GUILD_ID: GUILD, PILOT_CHANNEL_ID: CHANNEL, DISCORD_PUBLIC_KEY: 'ab'.repeat(32) };
   assert.equal(loadServerConfig(env).host, '127.0.0.1');
+  assert.equal(loadServerConfig(env).publishingEnabled, true);
+  assert.equal(loadServerConfig({ ...env, PILOT_PUBLISH_ENABLED: 'no' }).publishingEnabled, false);
+  assert.throws(() => loadServerConfig({ ...env, PILOT_PUBLISH_ENABLED: 'false' }), /PILOT_PUBLISH_ENABLED/);
   assert.deepEqual(loadServerConfig(env).allowedPairs, [{ guildId: GUILD, channelId: CHANNEL }]);
   const pairs = `${GUILD}:${CHANNEL}, ${OTHER_GUILD}:${OTHER_CHANNEL}`;
   assert.deepEqual(loadServerConfig({ DISCORD_APPLICATION_ID: APP, DISCORD_PUBLIC_KEY: 'ab'.repeat(32), PILOT_ALLOWED_PAIRS: pairs }).allowedPairs,

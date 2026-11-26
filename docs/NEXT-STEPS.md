@@ -27,13 +27,13 @@ Work required:
 
 Success is a usable, correctly scoped Discord interaction. Automated local tests alone do not establish this milestone.
 
-The [private two-server beta plan](TWO-SERVER-BETA.md) records the local pair allowlist, the profile migration still required, and the launch gates.
+The [private two-server beta plan](TWO-SERVER-BETA.md) records the local pair allowlist, the fictional guild-profile cutover rehearsal, and the gates for applying it to a real store.
 
 ## Milestone 2 — reduce the typing
 
 The compact menu and contextual controls are checked locally. `/session create` accepts the [documented sentence pattern](../README.md#create-from-a-sentence), including a weekday, a `YYYY-MM-DD` date, or a date-only weekend draft. The host edits and recovers drafts in private, picks exact times before publishing a weekend draft, and confirms cancellation on published sessions. Guild registration and live verification remain pending.
 
-Recognized sentences with missing AM or PM, end time, or time zone get a specific private hint. The host submits the corrected sentence to create the draft.
+A sentence that supplies a start and wholly omits an end gets an editable two-hour default. An unfinished explicit range, missing AM or PM, or missing time zone gets a specific private hint. The host submits the corrected sentence to create the draft.
 
 Future work includes recognizing stated expectations, supporting more time formats, and remembering defaults where users consent. Ask a brief follow-up for other genuinely missing or ambiguous details.
 
@@ -45,7 +45,7 @@ The current parser runs locally. Authorization, capacity, consent and publicatio
 
 Add opt-in reminders and an end-time notice with a persistent job store, delivery records, restart recovery and cancellation handling. Define delivery channels and frequency with the user. Use bounded retries and avoid duplicate notifications.
 
-The [voice-room prototype](VOICE-ROOMS.md) uses the published session capacity and tests local SQLite recovery with a mock adapter. Review its remaining gates before wiring it into Discord.
+The [offline voice pilot](VOICE-ROOMS.md) exercises signed button presses, trusted presence, category-scoped REST calls, and SQLite ownership receipts. Live voice remains disabled pending permission and roster verification, real Gateway reconnect checks, and a safe way to close the gap between the last occupancy check and channel deletion.
 
 Then add a waitlist if the pilot demonstrates a need. A waitlisted person is not a confirmed group member and must not receive shared Bungie Names. Changing capacity after publication or promoting someone needs a deterministic, tested transition.
 

@@ -1,6 +1,8 @@
 import { checkActivityName, hasBungieName, parseScheduleText, parseWeekendText, SCHEDULE_TEXT_EXAMPLE, SCHEDULE_TEXT_LIMIT, ScheduleTextError } from './schedule-text.ts';
 import { CAPACITY_HINT, MAX_CAPACITY, MIN_CAPACITY, isValidCapacity } from './capacity.ts';
 import type { Actor, DraftPreview, DraftSchedule, PublicSession, SessionInput, SessionStoreContract } from './types.ts';
+import type { VoicePilot, VoicePilotScope } from './voice-pilot.ts';
+import { VoiceRoomError } from './voice-rooms.ts';
 
 /** Official protocol references, checked 2026-11-25:
  * https://docs.discord.com/developers/interactions/receiving-and-responding
@@ -9,6 +11,7 @@ import type { Actor, DraftPreview, DraftSchedule, PublicSession, SessionInput, S
  */
 export const EPHEMERAL = 64;
 export const REPLAY_NOTICE = 'This request was already handled. Check the channel or use /session find to see the current session.';
+const PUBLISH_DISABLED = 'Publishing is disabled for this test. You can edit or discard this draft.';
 const SUPPRESS_EMBEDS = 4;
 const SNOWFLAKE = /^\d{17,20}$/;
 const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -29,6 +32,8 @@ export type InteractionResponse = { type: 1 } | { type: 4 | 7; data: MessageData
 export type PilotConfig = {
   applicationId: string;
   allowedPairs: ReadonlyArray<Pick<Actor, 'guildId' | 'channelId'>>;
+  publishingEnabled?: boolean;
+  voiceScopes?: readonly VoicePilotScope[];
 };
 
 class InputError extends Error {}
@@ -109,7 +114,7 @@ function organizerWindow(session: PublicSession): string {
 }
 
 /** Explicit allowlist projection. Never serialize a store object into a Discord message. */
-export function publicCard(session: PublicSession): MessageData {
+export function publicCard(session: PublicSession, voiceEnabled = false): MessageData {
   const id = sessionId(session.id);
   const open = session.status === 'open';
   const roster = session.members.filter(m => SNOWFLAKE.test(m.userId))
@@ -134,16 +139,17 @@ export function publicCard(session: PublicSession): MessageData {
       button('leave', id, 'Leave', 2, !open),
       button('refresh', id, 'Refresh'),
       button('cancel-open', id, 'Host Cancel', 4, !open),
-    ] }],
+    ] }, ...(voiceEnabled && open ? [{ type: 1 as const, components: [button('voice-room', id, 'Join voice')] }] : [])],
   };
 }
 
-function privateCard(session: PublicSession, prefix = ''): InteractionResponse {
-  const data = publicCard(session);
+function privateCard(session: PublicSession, prefix = '', voiceEnabled = false): InteractionResponse {
+  const data = publicCard(session, voiceEnabled);
   return { type: 4, data: { ...data, content: prefix + data.content, flags: SUPPRESS_EMBEDS | EPHEMERAL } };
 }
 
-function draftMessage(draft: DraftPreview, showOrganizerTime: boolean, defaultDuration = false): InteractionResponse {
+function draftMessage(draft: DraftPreview, publishingEnabled: boolean, showOrganizerTime: boolean,
+  defaultDuration = false): InteractionResponse {
   const { session, revision, shareName, availability } = draft;
   const code = `${session.id}:${revision}`;
   const time = new Intl.DateTimeFormat('en-US', { timeStyle: 'short', timeZone: 'UTC' });
@@ -152,21 +158,22 @@ function draftMessage(draft: DraftPreview, showOrganizerTime: boolean, defaultDu
     availability.preferredStartMinute === undefined || availability.preferredEndMinute === undefined
       ? 'Flexible hours'
       : `Preferred each day · ${time.format(availability.preferredStartMinute * 60_000)} to ${time.format(availability.preferredEndMinute * 60_000)}`,
-    'Pick one day and exact times in Edit before publishing.',
+    publishingEnabled ? 'Pick one day and exact times in Edit before publishing.' : 'Use Edit to pick one day and exact times.',
   ] : [
     `${timestamp(draft.session.startAt)} → ${timestamp(draft.session.endAt)}`,
     showOrganizerTime ? `Organizer’s time · ${organizerWindow(draft.session)}` : '',
     defaultDuration ? 'Default duration · 2 hours (edit to change)' : '',
   ];
   return message([
-    '**Private draft — review before publishing**',
+    publishingEnabled ? '**Private draft — review before publishing**' : '**Private draft**',
+    publishingEnabled ? '' : PUBLISH_DISABLED,
     `**Marathon · ${safeText(session.activity, 120)}**`,
     ...schedule,
     `${safeText(session.timeZone, 64)} · ${session.members.length}/${session.capacity} players`,
     session.platformNotes ? `Platform · ${safeText(session.platformNotes, 180)}` : 'Platform · optional',
     `Your Bungie Name: ${shareName ? 'share with joined members' : 'keep private'}.`,
   ].filter(Boolean).join('\n'), [
-    { type: 1, components: [button('publish', code, 'Publish', 1, availability !== undefined), button('discard', code, 'Discard', 4),
+    { type: 1, components: [button('publish', code, 'Publish', 1, !publishingEnabled || availability !== undefined), button('discard', code, 'Discard', 4),
       button('edit', code, 'Edit'), button('draft-page', '1', 'My drafts')] },
     { type: 1, components: [button('draft-share-on', code, 'Share my Bungie ID: Yes', 2, shareName),
       button('draft-share-off', code, 'Share my Bungie ID: No', 2, !shareName)] },
@@ -327,13 +334,31 @@ function errorMessage(error: unknown): string {
   return messages[code] ?? 'That action could not be completed. Check the session, profile, and time settings, then try again.';
 }
 
+/** Only the signed HTTP handler dispatches asynchronous voice button requests. */
+export async function handleVoiceRoomInteraction(payload: RecordValue, config: PilotConfig,
+  voice: VoicePilot | undefined): Promise<InteractionResponse> {
+  try {
+    const actor = actorFrom(payload, config);
+    if (!voice) return message('Voice rooms are disabled in this channel.');
+    const { custom_id: customId } = record(payload.data);
+    if (typeof customId !== 'string' || !customId.startsWith('ns:voice-room:')) throw new InputError('Invalid voice button.');
+    const id = sessionId(customId.slice('ns:voice-room:'.length));
+    const roomId = await voice.roomFor(actor, id);
+    return message(`**Your session voice room**\n<https://discord.com/channels/${actor.guildId}/${roomId}>`);
+  } catch (error) {
+    return message(error instanceof VoiceRoomError ? error.message : errorMessage(error));
+  }
+}
+
 /** Call only after verifying Discord's raw HTTP signature. Does no network I/O. */
 export function handleInteraction(input: unknown, store: SessionStoreContract, config: PilotConfig,
   referenceMs = Date.now()): InteractionResponse {
+  const publishingEnabled = config.publishingEnabled !== false;
   try {
     const payload = record(input);
     if (payload.type === 1) return { type: 1 };
     const actor = actorFrom(payload, config);
+    const voiceEnabled = config.voiceScopes?.some(scope => scope.guildId === actor.guildId && scope.channelId === actor.channelId) ?? false;
     const data = record(payload.data);
     if (payload.type === 2) {
       const { name, values } = options(data);
@@ -359,7 +384,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
         // Old command versions may be cached. The current sentence command always starts private.
         const share = name === 'create' && fromText ? false : boolOption(values, 'share');
         const weekend = request === undefined ? undefined : parseWeekendText(request, referenceMs);
-        if (weekend) return draftMessage(store.createWeekendDraft(actor, { ...TEXT_DRAFT_DEFAULTS, ...weekend }, share), true);
+        if (weekend) return draftMessage(store.createWeekendDraft(actor, { ...TEXT_DRAFT_DEFAULTS, ...weekend }, share), publishingEnabled, true);
         const parsed = request === undefined ? undefined : parseScheduleText(request, referenceMs);
         const input: SessionInput = parsed !== undefined ? {
           ...TEXT_DRAFT_DEFAULTS,
@@ -371,7 +396,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
           platformNotes: textOption(values, 'platform_notes', 'Check platform and cross-play settings together.'),
         };
         const session = store.createDraft(actor, input, share);
-        return draftMessage({ session, revision: 0, shareName: share }, fromText, parsed?.defaultDuration);
+        return draftMessage({ session, revision: 0, shareName: share }, publishingEnabled, fromText, parsed?.defaultDuration);
       }
       if (name === 'edit-draft') {
         const { id, revision } = draftReference(values.get('draft'));
@@ -379,7 +404,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
         const draft = Object.keys(changes).length
           ? store.editDraft(actor, id, revision, changes)
           : store.getDraft(actor, id);
-        return draftMessage(draft, true);
+        return draftMessage(draft, publishingEnabled, true);
       }
       if (name === 'drafts') {
         const page = values.get('page') ?? 1;
@@ -443,7 +468,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
         ...(capacity === undefined ? {} : { capacity }),
         ...(activity ? { activity } : {}),
         ...(platformNotes === undefined ? {} : { platformNotes }),
-      }), true, defaultDuration);
+      }), publishingEnabled, true, defaultDuration);
     }
     if (action === 'draft-page') {
       if (!/^\d+$/.test(reference)) throw new InputError('Choose a positive draft page number.');
@@ -461,7 +486,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
     }
     if (action === 'edit' || action === 'draft-share-on' || action === 'draft-share-off') {
       const { id, revision } = draftReference(reference);
-      if (action !== 'edit') return draftMessage(store.editDraft(actor, id, revision, { shareName: action === 'draft-share-on' }), true);
+      if (action !== 'edit') return draftMessage(store.editDraft(actor, id, revision, { shareName: action === 'draft-share-on' }), publishingEnabled, true);
       const draft = store.getDraft(actor, id);
       if (draft.revision !== revision) throw new InputError('This draft preview is out of date. Open the latest from My drafts.');
       return modal(`ns:save-draft:${reference}`, 'Edit draft', [
@@ -472,9 +497,10 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
       ]);
     }
     if (action === 'publish') {
+      if (!publishingEnabled) return message(PUBLISH_DISABLED);
       if (typeof payload.id !== 'string' || !SNOWFLAKE.test(payload.id)) throw new InputError('Invalid Publish interaction.');
       const { id, revision } = draftReference(reference);
-      return { type: 4, data: publicCard(store.publish(actor, id, payload.id, revision)) };
+      return { type: 4, data: publicCard(store.publish(actor, id, payload.id, revision), voiceEnabled) };
     }
     if (action === 'discard') {
       const { id, revision } = draftReference(reference);
@@ -482,8 +508,8 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
       return message('Draft discarded. No session card was published.');
     }
     const id = sessionId(reference);
-    if (action === 'open-draft') return draftMessage(store.getDraft(actor, id), true);
-    if (action === 'view') return privateCard(store.getSession(actor, id));
+    if (action === 'open-draft') return draftMessage(store.getDraft(actor, id), publishingEnabled, true);
+    if (action === 'view') return privateCard(store.getSession(actor, id), '', voiceEnabled);
     if (action === 'share-on' || action === 'share-off') {
       store.setSharing(actor, id, action === 'share-on');
       return message(action === 'share-on' ? 'Your Bungie Name is shared with current members of this session.' :
@@ -525,9 +551,9 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
     else session = store.getSession(actor, id);
     // Type 7 changes an existing public card; private search cards receive a private reply.
     if (onPublicCard) {
-      return { type: 7, data: publicCard(session) };
+      return { type: 7, data: publicCard(session, voiceEnabled) };
     }
-    return privateCard(session, action.startsWith('join') ? '**You joined this session.**\n' : '');
+    return privateCard(session, action.startsWith('join') ? '**You joined this session.**\n' : '', voiceEnabled);
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && (error.code === 'PROFILE_REQUIRED' || error.code === 'NO_PROFILE')) {
       return message(errorMessage(error), [{ type: 1, components: [button('profile-edit', 'me', 'Save Bungie ID')] }]);

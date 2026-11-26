@@ -76,9 +76,9 @@ A full weekday also works. If you omit the activity, the draft uses **Group play
 
 Calendar dates must be in `YYYY-MM-DD` format. A weekday resolves to its first occurrence on or after today in the selected zone. The command rejects impossible dates, past dates, starts at or before the current time, and times skipped or repeated by daylight saving. If today's start has passed, choose a later time or enter a future date.
 
-Give a start time. If you omit the end, the draft shows an editable two-hour default. For example, `Marathon on Friday at 7 pm Pacific` drafts 7–9 pm Pacific. If you enter both times, give them on the same day, using `noon`, `h am/pm`, or `h:mm am/pm` for each. Supported zones are `Pacific` (the same as `America/Los_Angeles`) and `UTC`. Discord timestamps display in each viewer’s local zone. For example, Friday noon–3 pm UTC on November 27, 2026 appears as 4–7 am Pacific.
+When you give only a start time, the draft shows an editable two-hour default. For example, `Marathon on Friday at 7 pm Pacific` drafts 7–9 pm Pacific. If you enter both times, give them on the same day, using `noon`, `h am/pm`, or `h:mm am/pm` for each. Supported zones are `Pacific` (the same as `America/Los_Angeles`) and `UTC`. Discord timestamps display in each viewer’s local zone. For example, Friday noon–3 pm UTC on November 27, 2026 appears as 4–7 am Pacific.
 
-If AM or PM, the end time, or the time zone is missing from a recognized exact-time sentence, the command sends a private hint about what to add.
+If you start an explicit range with `from … to` and omit its end, the command asks for the end privately. Missing AM or PM or a missing time zone also gets a private hint.
 
 To name the activity, add `for` and the activity name after the zone. The whole sentence can be up to 160 characters. The activity is visible on the channel card after publishing, so keep Bungie Names out of it.
 
@@ -102,7 +102,7 @@ In the original channel, open **My drafts** from `/session help` or a draft prev
 
 ### Voice-room prototype
 
-The [offline voice lifecycle](docs/VOICE-ROOMS.md) passes the published session’s seat limit to the adapter. Fictional Gateway events and REST responses exercise the Discord payloads, ownership checks, and cleanup guards. Voice is disabled and the Discord command menu and cards have no voice control.
+The [offline voice pilot](docs/VOICE-ROOMS.md) connects the signed **Join voice** button to the room lifecycle only when the test supplies an explicit guild, text channel, and category with fictional Gateway and REST inputs. The normal server starts with voice disabled.
 
 ## Development server configuration
 
@@ -117,6 +117,8 @@ npm start
 By default, the server listens at `127.0.0.1:3000`. `GET /health` returns only an availability check; `POST /interactions` accepts verified Discord interactions. The default database lives at `data/next-session.sqlite`.
 
 The single-pair settings `PILOT_GUILD_ID` and `PILOT_CHANNEL_ID` are the default. For fictional two-server testing, set `PILOT_ALLOWED_PAIRS` to a comma-separated list of `guild_id:channel_id` pairs. An explicit list replaces the default pair. [Two-server configuration and launch gates](docs/TWO-SERVER-BETA.md)
+
+Set `PILOT_PUBLISH_ENABLED=no` for a draft-only smoke test. The private preview explains why **Publish** is disabled, and cached Publish buttons receive the same private explanation. Edit and Discard still work. Draft-only mode also keeps voice disabled. Explicit host publishing is available by default.
 
 Discord needs a reachable HTTPS interaction endpoint. Starting this local server alone does not connect Discord to it. A deliberate test setup must supply HTTPS routing, install the official app with appropriate permissions, configure the interaction endpoint, and register the guild-scoped command. The registration script modifies only this app's `/session` command in the chosen guild and is gated by `REGISTER_COMMANDS=yes`.
 
@@ -138,7 +140,7 @@ If the app stops after saving the session but before Discord receives the card, 
 
 The database is ordinary local SQLite, readable by the app operator. Clearing a name removes it from active records and sharing snapshots; this does not recall messages, screenshots or copies already made. Automatic data expiry, full account deletion and production backup/deletion behavior remain to be designed. No real participant dataset is bundled.
 
-Saved Bungie Name profiles are still keyed globally by Discord user ID, and clearing a profile affects that user’s snapshots across guilds. The [guild-scoped profile migration](docs/TWO-SERVER-BETA.md#planned-guild-scoped-profile-cutover) is required before a real two-server beta.
+The normal server still uses the legacy profile schema on databases that have not gone through cutover. The [guild-scoped profile cutover](docs/TWO-SERVER-BETA.md#guild-scoped-profile-cutover-rehearsal) was verified on a fictional database. Real rollout requires a separately approved migration and backup plan.
 
 See [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md) for the next milestone, [docs/PRODUCT.md](docs/PRODUCT.md) for accepted product decisions, and [VALIDATION.md](VALIDATION.md) for what was actually checked.
 
@@ -148,8 +150,9 @@ See [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md) for the next milestone, [docs/PRODU
 src/store.ts                 Session rules and SQLite persistence
 src/types.ts                 Domain contracts and public/private data shapes
 src/schedule-text.ts         Deterministic parser for short Marathon scheduling requests
-src/voice-rooms.ts           Offline, opt-in voice lifecycle for mocked adapters
-src/voice-room-registry.ts   Local SQLite links and provisioning receipts for mocked rooms
+src/voice-rooms.ts           Opt-in voice room lifecycle
+src/voice-pilot.ts           Offline wiring for scoped, signed voice interactions
+src/voice-room-registry.ts   SQLite voice links and provisioning receipts
 src/discord.ts               Slash commands, buttons and response rendering
 src/server.ts                Signed HTTP interaction endpoint
 src/demo.ts                  Fictional local walkthrough

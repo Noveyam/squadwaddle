@@ -23,12 +23,15 @@ export interface VoiceGateway {
   deleteIfEmpty(address: RoomAddress, expected: KnownPresence): Promise<boolean>;
 }
 
-/** Local lifecycle only. The live interaction server does not construct this service. */
+export class VoiceRoomError extends Error {}
+
+/** Room lifecycle with a separately supplied Gateway, registry and clock. */
 export class VoiceRooms {
   private readonly creating = new Map<string, Promise<CreatedVoiceRoom>>();
   private readonly emptySince = new Map<string, { epoch: number; revision: number; time: number }>();
   private readonly deleting = new Set<string>();
   private readonly categories: ReadonlyMap<string, string>;
+  private readonly pilotChannels?: ReadonlyMap<string, string>;
   private readonly sessions: Pick<SessionStoreContract, 'getSession'>;
   private readonly gateway: VoiceGateway;
   private readonly registry: VoiceRoomRegistry;
@@ -40,11 +43,13 @@ export class VoiceRooms {
     registry: VoiceRoomRegistry,
     categories: ReadonlyMap<string, string> = new Map(),
     now: () => number = Date.now,
+    pilotChannels?: ReadonlyMap<string, string>,
   ) {
     this.sessions = sessions;
     this.gateway = gateway;
     this.registry = registry;
     this.categories = new Map(categories);
+    this.pilotChannels = pilotChannels && new Map(pilotChannels);
     this.now = now;
   }
 
@@ -53,18 +58,21 @@ export class VoiceRooms {
     if (session.guildId !== actor.guildId || session.channelId !== actor.channelId ||
         session.status !== 'open' || Date.parse(session.endAt) <= this.now() ||
         !session.members.some(member => member.userId === actor.userId)) {
-      throw new Error('Only confirmed players in an open session can request its voice room.');
+      throw new VoiceRoomError('Only confirmed players in an open session can request its voice room.');
     }
     return session;
   }
 
   async roomFor(actor: Actor, sessionId: string): Promise<string> {
     const categoryId = this.categories.get(actor.guildId);
-    if (!categoryId) throw new Error('Voice rooms are disabled in this server.');
+    if (!categoryId || (this.pilotChannels && this.pilotChannels.get(actor.guildId) !== actor.channelId)) {
+      throw new VoiceRoomError('Voice rooms are disabled in this channel.');
+    }
     const session = this.authorizedSession(actor, sessionId);
-    const request = { sessionId: session.id, guildId: session.guildId, categoryId, capacity: session.capacity };
+    const request = { sessionId: session.id, guildId: session.guildId,
+      channelId: session.channelId, categoryId, capacity: session.capacity };
     let link = this.registry.reserve(request);
-    if (this.deleting.has(link.provisionId)) throw new Error('Voice room cleanup is in progress.');
+    if (this.deleting.has(link.provisionId)) throw new VoiceRoomError('Voice room cleanup is in progress.');
     if (link.roomId !== null) {
       const room = { ...link, roomId: link.roomId };
       if (this.gateway.presence({ guildId: room.guildId, roomId: room.roomId }).state !== 'missing') {
@@ -101,7 +109,8 @@ export class VoiceRooms {
   async reapEmptyRooms(): Promise<void> {
     for (const room of this.registry.createdRooms()) {
       const key = room.provisionId;
-      if (this.categories.get(room.guildId) !== room.categoryId || this.deleting.has(key)) continue;
+      if (this.categories.get(room.guildId) !== room.categoryId || this.deleting.has(key) ||
+          (this.pilotChannels && this.pilotChannels.get(room.guildId) !== room.channelId)) continue;
       const address = { guildId: room.guildId, roomId: room.roomId };
       const seen = this.gateway.presence(address);
       if (seen.state === 'missing') {

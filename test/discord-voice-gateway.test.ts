@@ -71,6 +71,8 @@ test('Discord voice is disabled by default and creates only in its verified cate
   await assert.rejects(f.gateway.createPrivateRoom({ ...f.request, categoryId: OTHER_CATEGORY }), /scope or roster/);
   assert.deepEqual(f.calls, []);
   const wrongParent = new DiscordVoiceGateway(async () => ({ ...parent, type: 0 }), f.registry, categories);
+  await assert.rejects(f.gateway.createPrivateRoom(f.request), /Voice presence is unavailable/);
+  stream(wrongParent).snapshot();
   await assert.rejects(wrongParent.createPrivateRoom(f.request), /category could not be verified/);
 
   const oldSnapshot = stream(f.gateway);
@@ -106,7 +108,9 @@ test('a lost Discord acknowledgement survives restart and never repeats the POST
       if (method === 'GET') return parent;
       throw new Error('Lost fictional response after POST.');
     };
-    await assert.rejects(new DiscordVoiceGateway(rest, registry, categories).createPrivateRoom(request), /Lost fictional/);
+    const first = new DiscordVoiceGateway(rest, registry, categories);
+    stream(first).snapshot();
+    await assert.rejects(first.createPrivateRoom(request), /Lost fictional/);
     registry.close();
     registry = new VoiceRoomRegistry(join(dir, 'rooms.sqlite'));
     const gateway = new DiscordVoiceGateway(rest, registry, categories);
@@ -121,8 +125,24 @@ test('a lost Discord acknowledgement survives restart and never repeats the POST
   }
 });
 
+test('losing the trusted snapshot during category lookup stops provisioning before the POST', async t => {
+  const f = fixture(t);
+  const calls: string[] = [];
+  const gateway = new DiscordVoiceGateway(async method => {
+    calls.push(method);
+    connection.disconnect();
+    return parent;
+  }, f.registry, categories);
+  const connection = stream(gateway);
+  connection.snapshot();
+  await assert.rejects(gateway.createPrivateRoom(f.request), /presence changed during setup/);
+  assert.deepEqual(calls, ['GET']);
+  assert.equal(f.registry.discordCreation(f.link.provisionId, GUILD, CATEGORY, f.link.capacity), undefined);
+});
+
 test('voice moves change revision and disconnect, stale sockets, resume, and sequence gaps cannot prove emptiness', async t => {
   const f = fixture(t);
+  stream(f.gateway).snapshot();
   await f.create();
   const first = stream(f.gateway);
   first.snapshot([{ user_id: GUEST, channel_id: ROOM }]);
@@ -155,6 +175,7 @@ test('voice moves change revision and disconnect, stale sockets, resume, and seq
 test('Discord cleanup only deletes an acknowledged room still in the configured category with unchanged empty presence', async t => {
   const f = fixture(t);
   f.registry.confirm(f.registry.reserve({ sessionId: 'mock-only-session', ...scope }), OTHER_ROOM);
+  stream(f.gateway).snapshot();
   await f.create();
   const gw = stream(f.gateway);
   gw.snapshot();

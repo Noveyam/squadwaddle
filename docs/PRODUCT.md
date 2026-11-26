@@ -39,7 +39,7 @@ Leaving ends future access; revoking sharing removes the name from future lookup
 
 ## Features deliberately deferred
 
-More flexible scheduling sentences, natural-language search, live voice rooms, persisted reminders, waitlists, recurring sessions, preference-based discovery, multi-server matching, social sharing, external account OAuth and a standalone social feed are later increments. The local [voice-room lifecycle](VOICE-ROOMS.md) is exercised only with a mock adapter.
+More flexible scheduling sentences, natural-language search, live voice rooms, persisted reminders, waitlists, recurring sessions, preference-based discovery, multi-server matching, social sharing, external account OAuth and a standalone social feed are later increments. The [offline voice pilot](VOICE-ROOMS.md) uses signed fictional interactions with injected Gateway events and REST responses.
 
 Novey's proposed 1–5 score is owner-only personal memory. It is not a public reputation system. Private ratings, notes about identifiable players, and person-specific matching remain deferred while the Discord Developer Policy question is resolved. Use fictional data for any design experiment involving them. Basic coordination must work independently.
 

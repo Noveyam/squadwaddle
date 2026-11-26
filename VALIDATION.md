@@ -1,5 +1,21 @@
 # Verification record
 
+## Local pilot guards and guild profiles
+
+Signed HTTP tests verified draft-only mode with publishing and voice disabled. The host could edit and discard, while old and repeated Publish clicks received a private explanation. The test recorded zero publication calls and zero outbound calls. The standard mode still required explicit host Publish.
+
+The signed voice pilot used fictional Gateway and REST inputs. It checked one room at a time per eligible session, 3- and 6-seat limits, confirmed-roster permissions, refusal without trusted presence, and two minutes of continuous confirmed emptiness. Untracked, occupied, moved, and out-of-scope rooms were left alone. Reconnect and restart checks exercised fresh snapshots and durable room receipts. The normal server still starts without voice. [Remaining live voice gates](docs/VOICE-ROOMS.md)
+
+An opt-in cutover used a temporary fictional SQLite file. The guild profile table started empty and existing drafts and rosters survived with their legacy name snapshots cleared. Signed saves, explicit shares, clearing within one guild, and restart verified isolation. [Real cutover gates](docs/TWO-SERVER-BETA.md#guild-scoped-profile-cutover-rehearsal)
+
+Run the focused checkpoints with Node 24.
+
+```sh
+node --test --test-name-pattern 'draft-only mode|signed voice pilot|fictional guild profile cutover' test/discord.test.ts
+```
+
+Node 24.22.3 passed all 86 tests, the signed solo rehearsal, and the demo with networking denied. Syntax and diff checks passed. Live Discord behavior and a real profile-database cutover were outside this run.
+
 ## Private Discord smoke test · November 25, 2026
 
 In a private test channel, Discord accepted the temporary signed interaction endpoint and guild-only command. An unsigned request was rejected. A real `/session create` returned a private draft for the requested time, with three seats and ID sharing off. Discard confirmed that no card was published. The endpoint and tunnel were then closed and the prior guild registration restored. This did not test live voice, publishing, or the two-hour default.

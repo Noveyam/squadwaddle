@@ -19,18 +19,17 @@ After signature and application checks, Discord’s top-level guild and channel 
 | Open sessions and drafts | Both lists filter by guild and channel. Drafts also filter by host and draft status. Reopening checks ownership, scope, and status again. |
 | Session actions and public card links | Viewing, editing, publishing, joining, leaving, cancelling, and changing sharing look up the session in the actor’s guild and channel before proceeding. Public card receipts must match a session in that pair. |
 | Group IDs and consent | Sharing and revocation update only the membership row for that session. Private name retrieval requires current membership in the scoped session. Saving a profile does not update existing session snapshots. |
-| Saved profile gap | Profiles are keyed by Discord user ID alone. The same user in two guilds can view or overwrite the same saved name. Explicit sharing can draw from that global name. Clearing the profile removes the global row and the user’s snapshots across guilds. |
+| Saved profiles | Databases that have gone through the opt-in cutover scope profile access and snapshot clearing to the actor’s guild. Unconverted databases still use the legacy global profile table and must stay single-server for real data. |
 
 The signed local test exercises both guilds on the same endpoint and store, including the same host and guest accounts in both. It verifies that lookups and mutations for a session ID from the other server are refused and that revoking an opted-in snapshot in one session leaves the other session’s snapshot intact.
 
-## Planned guild-scoped profile cutover
+## Guild-scoped profile cutover rehearsal
 
-1. Add a new `guild_profiles` table with primary key `(guild_id, user_id)`. Update profile reads, saves, and sharing lookups to use the verified actor’s guild and user ID. Keep the new table empty at cutover. Legacy profiles lack guild provenance, so membership, old snapshots, or a previous single-server setting cannot establish permission to copy a name.
-2. Rehearse and approve the data transition on a separate test copy. At an authorized cutover, pause writes, create the empty table and clear pre-cutover name snapshots in session memberships and weekend drafts in a maintenance transaction. Retain sessions, drafts, and rosters. Resume with the guild-scoped code only. Participants enter a name inside the server where they want to save it and explicitly opt in per session.
-3. Make profile clear remove only the caller’s guild profile and snapshots in sessions belonging to that guild. Define retirement and expiry for legacy records and backups before cutover. Restoring a pre-cutover copy must stay isolated until the privacy transition and relevant deletions have been reapplied.
-4. Verify with fictional data that the same user can save different names in two guilds, that a missing guild profile cannot use the other guild’s name, and that clearing one guild leaves the other intact. Check that existing drafts and rosters survive without names and that each session starts sharing again only after an explicit choice.
+The fictional test closes its legacy SQLite store and reopens it using `new SessionStore(path, clock, { guildScopedProfiles: true })`. A single transaction creates the empty `guild_profiles` table, clears legacy name snapshots from memberships and weekend drafts, advances affected private draft revisions, and retires the global table. Sessions, drafts, and rosters remain available. Later restarts recognize the guild-scoped table automatically.
 
-This is a migration design. The first milestone changes the endpoint scope and its tests, with the existing profile schema still in use.
+Signed fictional interactions verify that the same account can save different names in two guilds. Saving leaves session consent off until the member explicitly shares. Clearing removes the caller’s name and snapshots across their channels in that guild, including affected drafts. It leaves their other guild intact. The standard server has no environment switch to initiate cutover.
+
+For a real transition, approve a maintenance window, pause writes, and test a backup and isolated restore first. Use the guild-scoped code after cutover. Keep older binaries and pre-cutover backups isolated and define retention and deletion before enabling a real two-server beta. Participants enter their name again in the guild where they want to save it.
 
 ## Launch gates
 

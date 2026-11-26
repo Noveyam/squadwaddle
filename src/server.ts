@@ -3,8 +3,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { handleInteraction, EPHEMERAL, REPLAY_NOTICE, type PilotConfig } from './discord.ts';
+import { handleInteraction, handleVoiceRoomInteraction, EPHEMERAL, REPLAY_NOTICE, type PilotConfig } from './discord.ts';
 import type { SessionStoreContract } from './types.ts';
+import { VoicePilot, type VoicePilotDependencies } from './voice-pilot.ts';
 
 /** Signature protocol: https://docs.discord.com/developers/interactions/overview
  * We verify the exact timestamp + raw request bytes, before any JSON parsing.
@@ -45,7 +46,9 @@ export function loadServerConfig(env: Record<string, string | undefined> = proce
       return { guildId, channelId };
     });
   validateAllowedPairs(allowedPairs);
-  return { applicationId, allowedPairs,
+  const publish = env.PILOT_PUBLISH_ENABLED ?? 'yes';
+  if (publish !== 'yes' && publish !== 'no') throw new Error('PILOT_PUBLISH_ENABLED must be yes or no.');
+  return { applicationId, allowedPairs, publishingEnabled: publish === 'yes',
     publicKey: required('DISCORD_PUBLIC_KEY', /^[a-fA-F0-9]{64}$/), host: env.HOST || '127.0.0.1', port,
     dbPath: env.DB_PATH || './data/next-session.sqlite' };
 }
@@ -95,16 +98,21 @@ function json(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value));
 }
 
-/** No outbound calls. Responses are inline Discord callbacks and must complete within 3 seconds.
+/** Responses are inline Discord callbacks. The default runtime has no outbound calls.
  * The local replay set covers all interactions while running. Successful Publish IDs also survive
  * a restart with file-backed SQLite. Delivery after the database commit remains unreconciled.
  * No interaction tokens, raw bodies, names, or request headers are logged or retained here.
  */
 export function createInteractionServer(config: ServerConfig, store: SessionStoreContract,
-  now: () => number = Date.now) {
+  now: () => number = Date.now, voiceDependencies?: VoicePilotDependencies) {
   const key = verificationKey(config.publicKey); // Fail closed before opening a socket.
   if (!validSnowflake(config.applicationId)) throw new Error('DISCORD_APPLICATION_ID is missing or invalid.');
   validateAllowedPairs(config.allowedPairs);
+  const voiceScopes = config.publishingEnabled === false ? [] : config.voiceScopes?.map(scope => ({ ...scope })) ?? [];
+  if (voiceScopes.length && !voiceDependencies) throw new Error('Configured voice pilot scopes require an injected voice registry and REST transport.');
+  const voicePilot = voiceScopes.length && voiceDependencies
+    ? new VoicePilot(store, voiceScopes, config.allowedPairs, voiceDependencies, now) : undefined;
+  const interactionConfig = { ...config, voiceScopes };
   const completed = new Map<string, number>();
   const server = createServer(async (req, res) => {
     try {
@@ -134,13 +142,20 @@ export function createInteractionServer(config: ServerConfig, store: SessionStor
           content: REPLAY_NOTICE } }); return;
       }
       if (completed.size >= 10_000) throw new HttpError(503);
-      const reply = handleInteraction(payload, store, config, time);
       const data = payload.data as Record<string, unknown> | undefined;
-      const isPublish = payload.type === 3 && data?.component_type === 2 &&
-        typeof data.custom_id === 'string' && data.custom_id.startsWith('ns:publish:');
+      const componentId = payload.type === 3 && data?.component_type === 2 && typeof data.custom_id === 'string'
+        ? data.custom_id : '';
+      const expiresAt = Math.max(time, Number(req.headers['x-signature-timestamp']) * 1000) + FRESHNESS_SECONDS * 1000;
+      if (componentId.startsWith('ns:voice-room:')) {
+        // Claim the signed interaction before awaiting the injected transport.
+        completed.set(payload.id, expiresAt);
+        json(res, 200, await handleVoiceRoomInteraction(payload, interactionConfig, voicePilot));
+        return;
+      }
+      const reply = handleInteraction(payload, store, interactionConfig, time);
       // Only a fresh, committed Publish returns a public card. Let a rolled-back write retry.
-      if (!isPublish || (reply.type === 4 && ((reply.data.flags ?? 0) & EPHEMERAL) === 0)) {
-        completed.set(payload.id, Math.max(time, Number(req.headers['x-signature-timestamp']) * 1000) + FRESHNESS_SECONDS * 1000);
+      if (!componentId.startsWith('ns:publish:') || (reply.type === 4 && ((reply.data.flags ?? 0) & EPHEMERAL) === 0)) {
+        completed.set(payload.id, expiresAt);
       }
       json(res, 200, reply);
     } catch (error) {
@@ -154,7 +169,7 @@ export function createInteractionServer(config: ServerConfig, store: SessionStor
   server.requestTimeout = 3000;
   server.headersTimeout = 3000;
   server.keepAliveTimeout = 1000;
-  return server;
+  return Object.assign(server, { voicePilot });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

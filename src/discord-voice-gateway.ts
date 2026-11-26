@@ -1,6 +1,6 @@
 import { isValidCapacity } from './capacity.ts';
 import type { VoiceRoomRegistry } from './voice-room-registry.ts';
-import type { VoiceGateway, VoicePresence } from './voice-rooms.ts';
+import { VoiceRoomError, type VoiceGateway, type VoicePresence } from './voice-rooms.ts';
 
 type Payload = Record<string, unknown>;
 type Channel = { id: string; type: number; parentId: string | null };
@@ -148,6 +148,11 @@ export class DiscordVoiceGateway implements VoiceGateway {
     snapshot.revisions.set(channelId, (snapshot.revisions.get(channelId) ?? 0) + 1);
   }
 
+  hasTrustedCategory(guildId: string, categoryId: string): boolean {
+    return this.categories.get(guildId) === categoryId &&
+      this.snapshots.get(guildId)?.channels.get(categoryId)?.type === CATEGORY;
+  }
+
   async createPrivateRoom({ provisionId, guildId, categoryId, capacity, allowedUserIds }:
     Parameters<VoiceGateway['createPrivateRoom']>[0]): Promise<string> {
     const userIds = [...new Set(allowedUserIds)];
@@ -155,6 +160,8 @@ export class DiscordVoiceGateway implements VoiceGateway {
         !userIds.length || userIds.length > capacity || userIds.some(id => !idIsValid(id) || id === guildId)) {
       throw new Error('Invalid Discord voice room scope or roster.');
     }
+    if (!this.hasTrustedCategory(guildId, categoryId)) throw new VoiceRoomError('Voice presence is unavailable. Try again after it reconnects.');
+    const snapshot = this.snapshots.get(guildId);
     const saved = this.registry.discordCreation(provisionId, guildId, categoryId, capacity);
     if (saved?.roomId) return saved.roomId;
     if (saved) throw new Error('The previous Discord voice creation needs an ownership check.');
@@ -162,6 +169,9 @@ export class DiscordVoiceGateway implements VoiceGateway {
     const parent = asRecord(await this.rest('GET', path));
     if (parent?.id !== categoryId || parent.guild_id !== guildId || parent.type !== CATEGORY) {
       throw new Error('The configured Discord voice category could not be verified.');
+    }
+    if (this.snapshots.get(guildId) !== snapshot || !this.hasTrustedCategory(guildId, categoryId)) {
+      throw new VoiceRoomError('Voice presence changed during setup. Try again once it is available.');
     }
     if (!this.registry.claimDiscordCreation(provisionId, guildId, categoryId, capacity)) {
       throw new Error('Discord voice creation has already been claimed or does not match the registry.');
