@@ -12,6 +12,8 @@ import { VoiceRoomError } from './voice-rooms.ts';
 export const EPHEMERAL = 64;
 export const REPLAY_NOTICE = 'This request was already handled. Check the channel or use /session find to see the current session.';
 const PUBLISH_DISABLED = 'Publishing is disabled for this test. You can edit or discard this draft.';
+const SHARE_AUDIENCE = 'If you share, confirmed teammates in this session can see your name privately, including people who join later.';
+const NAME_SHARED = 'Your Bungie Name is shared with current members of this session and with confirmed teammates who join later. They can look it up privately.';
 const SUPPRESS_EMBEDS = 4;
 const SNOWFLAKE = /^\d{17,20}$/;
 const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -128,7 +130,7 @@ export function publicCard(session: PublicSession, voiceEnabled = false): Messag
       session.platformNotes ? `Platform / cross-play: ${publicText(session.platformNotes, 180)}` : '',
       `Group: ${roster || 'No players'}`,
       `Session: ${id}`,
-      'Bungie Names are optional and visible only to joined members who request them.',
+      'Sharing is optional. Confirmed teammates, including those who join later, can request shared names privately.',
       'Join only: I’ll arrange my in-game connection with the host.',
     ].filter(Boolean).join('\n'),
     flags: SUPPRESS_EMBEDS,
@@ -172,6 +174,7 @@ function draftMessage(draft: DraftPreview, publishingEnabled: boolean, showOrgan
     `${safeText(session.timeZone, 64)} · ${session.members.length}/${session.capacity} players`,
     session.platformNotes ? `Platform · ${safeText(session.platformNotes, 180)}` : 'Platform · optional',
     `Your Bungie Name: ${shareName ? 'share with joined members' : 'keep private'}.`,
+    SHARE_AUDIENCE,
   ].filter(Boolean).join('\n'), [
     { type: 1, components: [button('publish', code, 'Publish', 1, !publishingEnabled || availability !== undefined), button('discard', code, 'Discard', 4),
       button('edit', code, 'Edit'), button('draft-page', '1', 'My drafts')] },
@@ -426,7 +429,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
         if (!values.has('enabled')) throw new InputError('Choose enabled:true to share or enabled:false to revoke.');
         const enabled = boolOption(values, 'enabled');
         store.setSharing(actor, id, enabled);
-        return message(enabled ? 'Your Bungie Name is shared with current members of this session.' :
+        return message(enabled ? NAME_SHARED :
           'Future group-ID lookups will no longer show your Bungie Name for this session. Previous copies cannot be recalled.');
       }
       if (name === 'cancel') {
@@ -512,7 +515,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
     if (action === 'view') return privateCard(store.getSession(actor, id), '', voiceEnabled);
     if (action === 'share-on' || action === 'share-off') {
       store.setSharing(actor, id, action === 'share-on');
-      return message(action === 'share-on' ? 'Your Bungie Name is shared with current members of this session.' :
+      return message(action === 'share-on' ? NAME_SHARED :
         'Future group-ID lookups will omit your Bungie Name.');
     }
     if (action === 'confirm-cancel') {
@@ -530,7 +533,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
       const session = store.getSession(actor, id);
       if (session.status === 'cancelled') return onPublicCard ? { type: 7, data: publicCard(session) } : privateCard(session);
       if (session.status !== 'open') throw new InputError('This session is not open.');
-      return message(`Join **${publicText(session.activity, 120)}**?`, [
+      return message(`Join **${publicText(session.activity, 120)}**?\n${SHARE_AUDIENCE}`, [
         { type: 1, components: [button('join', id, 'Join only', 1), button('join-share', id, 'Join & share Bungie Name'),
           button('profile', 'me', 'My Bungie ID')] },
       ]);
@@ -540,7 +543,7 @@ export function handleInteraction(input: unknown, store: SessionStoreContract, c
       const lines = members.map(m => `${SNOWFLAKE.test(m.userId) ? `<@${m.userId}>` : 'Member'}: ${m.bungieName
         ? safeText(m.bungieName, 100)
         : 'ID not shared. Ask this player how they want to connect.'}`);
-      return message(`**Group IDs — only you can see this reply**\n${lines.join('\n')}\nUse shared names in Marathon’s Runner Connections. Copies cannot be recalled.`, [
+      return message(`**Group IDs — only you can see this reply**\n${lines.join('\n')}\nUse shared names in Marathon’s Runner Connections. Copies cannot be recalled.\n${SHARE_AUDIENCE}`, [
         { type: 1, components: [button('share-on', id, 'Share my Bungie ID'), button('share-off', id, 'Stop sharing'),
           button('profile', 'me', 'My Bungie ID')] },
       ]);

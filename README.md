@@ -52,7 +52,9 @@ The rehearsal plays all roles with fictional users and a fresh in-memory databas
 | Persistence | SQLite stores profiles, sessions and membership across restarts |
 | Discord endpoint | Verifies requests before parsing and accepts signed interactions only from approved guild/channel pairs |
 
-Public cards contain no Bungie Names. The host uses the same sharing rules as every other participant. A participant choosing **Join only** takes responsibility for arranging their in-game connection with the host.
+Public cards contain no Bungie Names. When you opt in for a session, confirmed teammates can look up your name privately, including people who join after you. Leaving ends access to future lookups. A participant choosing **Join only** arranges their in-game connection with the host.
+
+Use the [two-seat private pilot](docs/TWO-SEAT-PILOT.md) to rehearse the text flow with one guest.
 
 ## Included Discord commands
 

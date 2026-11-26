@@ -1596,6 +1596,70 @@ test('signed weekend dates follow the organizer zone at a UTC day boundary', asy
 test('real SQLite store through signed HTTP enforces preview, consent, membership and revocation end to end', t =>
   verifySignedSessionFlow(t, 'structured'));
 
+test('signed two-seat text pilot lets a late confirmed guest see the host’s opt-in until leaving', async t => {
+  let now = Date.parse('2026-11-26T12:00:00Z');
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const config = { ...PILOT, publicKey: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex'),
+    host: '127.0.0.1', port: 3148, dbPath: ':memory:' };
+  const store = new SessionStore(':memory:', () => new Date(now));
+  t.after(() => store.close());
+  const server = createInteractionServer(config, store, () => now);
+  let next = 100000000000000700n;
+  const send = (payload: object) => signedResponse(server, privateKey, now, { ...payload, id: String(next++) });
+  const click = (card: MessageData, label: string, user = HOST) =>
+    send(buttonPress(buttonNamed(card, label).custom_id, user, card.flags));
+  const privateReply = (reply: Awaited<ReturnType<typeof send>>, pattern: RegExp) => {
+    const data = messageData(reply);
+    assert.equal(data.flags! & EPHEMERAL, EPHEMERAL);
+    assert.match(data.content, pattern);
+    return data;
+  };
+  const publicReply = (reply: Awaited<ReturnType<typeof send>>, pattern: RegExp) => {
+    const data = messageData(reply);
+    assert.equal(data.flags! & EPHEMERAL, 0);
+    assert.match(data.content, pattern);
+    assert.doesNotMatch(JSON.stringify(data), /ExampleHost|Join voice/);
+    return data;
+  };
+
+  const help = privateReply(await send(command('help')), /SquadWaddle/);
+  const profile = privateReply(await click(help, 'My Bungie ID'), /No Bungie Name saved/);
+  const form = await click(profile, 'Save Bungie ID');
+  assert.equal(form.type, 9);
+  privateReply(await send(submitForm(form.data.custom_id, { bungie_name: 'ExampleHost#1234' })), /saved privately/);
+
+  const request = 'Two players total for Marathon on 2026-12-11 at 6:30 pm Pacific for Expedition practice.';
+  const draft = privateReply(await send(command('create', { request })), /6:30 PM to 8:30 PM/);
+  assert.match(draft.content, /Default duration · 2 hours.*\n.*1\/2 players/);
+  assert.match(draft.content, /keep private.*\n.*including people who join later/);
+  privateReply(await send(command('find', {}, GUEST)), /No open sessions/);
+  const edit = await click(draft, 'Edit');
+  assert.equal(edit.type, 9);
+  const reviewed = privateReply(await send(submitForm(edit.data.custom_id, {
+    request: request.replace('at 6:30 pm', 'from 6:30 pm to 8:00 pm'),
+  })), /6:30 PM to 8:00 PM/);
+  assert.doesNotMatch(reviewed.content, /Default duration/);
+  const share = privateReply(await click(reviewed, 'Share my Bungie ID: Yes'), /share with joined members/);
+  const card = publicReply(await click(share, 'Publish'), /1\/2 players · open/);
+
+  now = Date.parse('2026-12-12T02:35:00Z'); // Five minutes after the Pacific start.
+  privateReply(await click(card, 'Show group IDs', GUEST), /Join this session/);
+  const choices = privateReply(await click(card, 'Join', GUEST), /including people who join later/);
+  privateReply(await click(choices, 'Join only', GUEST), /2\/2 players/);
+  const repeat = privateReply(await click(choices, 'Join only', GUEST), /2\/2 players/);
+  assert.equal(repeat.content.split(`<@${GUEST}>`).length - 1, 1);
+  privateReply(await click(card, 'Show group IDs', GUEST), /ExampleHost/);
+  privateReply(await click(card, 'Show group IDs'), new RegExp(`<@${GUEST}>: ID not shared`));
+  const reopened = publicReply(await click(card, 'Leave', GUEST), /1\/2 players/);
+  privateReply(await click(card, 'Show group IDs', GUEST), /Join this session/);
+
+  const confirm = privateReply(await click(reopened, 'Host Cancel'), /closes the session to new joins/);
+  privateReply(await click(confirm, 'Confirm cancellation'), /Session cancelled/);
+  publicReply(await click(reopened, 'Refresh'), /cancelled/);
+  publicReply(await click(reopened, 'Join', GUEST), /cancelled/);
+  privateReply(await send(command('find', {}, GUEST)), /No open sessions/);
+});
+
 test('offline solo rehearsal', t => verifySignedSessionFlow(t, 'text'));
 
 async function verifySignedSessionFlow(t: TestContext, draftSource: 'structured' | 'text') {
